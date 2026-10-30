@@ -1,4 +1,5 @@
 import { and, eq } from "drizzle-orm";
+import { isUniqueConstraintError } from "@/lib/database-errors";
 import { NextResponse } from "next/server";
 import { getDb } from "@/db";
 import { bookingEvents, users } from "@/db/schema";
@@ -40,7 +41,7 @@ export async function POST(request: Request) {
 		const [event] = await db.insert(bookingEvents).values({ ...input, id: newId("book"), userId: user.id, hostIds: JSON.stringify(hostIds), weekdays: JSON.stringify(input.weekdays), timeRanges: JSON.stringify(input.timeRanges) }).returning();
 		return NextResponse.json({ event });
 	} catch (error) {
-		if (error instanceof Error && /UNIQUE constraint failed|booking_events_user_slug_idx/i.test(error.message)) return NextResponse.json({ error: "This event link is already in use." }, { status: 409 });
+		if (isUniqueConstraintError(error)) return NextResponse.json({ error: "This event link is already in use." }, { status: 409 });
 		throw error;
 	}
 }

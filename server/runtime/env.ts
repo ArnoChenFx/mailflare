@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { getDatabaseConfig, withDatabase } from "@/db/with-database";
 import { withStorage } from "@/lib/storage";
 import { openFileBucket } from "./file-bucket";
 import { openMailer, type Mailer, type MailerConfig } from "./mailer";
@@ -32,7 +33,8 @@ export function createNodeRuntime(): NodeRuntime {
 	const dataDir = resolve(optional("DATA_DIR") ?? "./data");
 	mkdirSync(join(dataDir, "blobs"), { recursive: true });
 
-	const database = openSqliteDatabase(join(dataDir, "mailflare.sqlite"));
+	// DATABASE_URL moves the data to PostgreSQL, MySQL or libSQL; otherwise it lives in a local SQLite file.
+	const database = getDatabaseConfig({}).driver === "d1" ? openSqliteDatabase(join(dataDir, "mailflare.sqlite")) : undefined;
 	const bucket = openFileBucket(join(dataDir, "blobs"));
 	const mailer = openMailer(mailerConfig());
 	const inboundQueue = openQueue("mailflare-inbound");
@@ -56,6 +58,7 @@ export function createNodeRuntime(): NodeRuntime {
 		IMAGES: undefined as unknown as CloudflareEnv["IMAGES"],
 		WORKER_SELF_REFERENCE: undefined as unknown as CloudflareEnv["WORKER_SELF_REFERENCE"],
 		LOGIN_RATE_LIMIT: openRateLimiter(20, 60),
+		DEVICE_LOGIN_RATE_LIMIT: openRateLimiter(10, 60),
 		AGENT_RATE_LIMIT: openRateLimiter(120, 60),
 		B2_KEY_ID: optional("B2_KEY_ID"),
 		B2_APPLICATION_KEY: optional("B2_APPLICATION_KEY"),
@@ -80,13 +83,13 @@ export function createNodeRuntime(): NodeRuntime {
 		VAPID_PRIVATE_KEY: optional("VAPID_PRIVATE_KEY"),
 		VAPID_SUBJECT: optional("VAPID_SUBJECT"),
 	} as unknown as CloudflareEnv;
-	const storageEnv = withStorage(env);
+	const storageEnv = withDatabase(withStorage(env));
 	realtime.bindEnv(storageEnv);
 
 	return {
 		env: storageEnv,
 		dataDir,
-		database: database as unknown as SqliteDatabase,
+		database: database as unknown as SqliteDatabase | undefined,
 		mailer: mailer as unknown as Mailer,
 		inboundQueue: inboundQueue as unknown as InProcessQueue,
 		outboundQueue: outboundQueue as unknown as InProcessQueue,

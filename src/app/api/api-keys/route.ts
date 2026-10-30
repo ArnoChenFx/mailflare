@@ -5,7 +5,7 @@ import { getEnv } from "@/lib/cloudflare";
 import { getDb } from "@/db";
 import { agentSendApprovals, apiKeys, mcpKeyMailboxes } from "@/db/schema";
 import { requireUser } from "@/lib/auth/cookies";
-import { generateApiKey, parseScopes, scopesToJson } from "@/lib/api-keys";
+import { generateApiKey, generateAppPassword, parseScopes, scopesToJson } from "@/lib/api-keys";
 import { API_KEY_SCOPES } from "@/lib/api/scopes";
 import { newId } from "@/lib/ids";
 import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
@@ -37,7 +37,7 @@ export async function GET(request: Request) {
 		.where(eq(apiKeys.userId, user.id));
 	const keyIds = rows.map((row) => row.id);
 	const allowed = keyIds.length ? await db.select().from(mcpKeyMailboxes).where(inArray(mcpKeyMailboxes.keyId, keyIds)) : [];
-	return NextResponse.json({ apiKeys: rows.filter((row) => !parseScopes(row.scopes).some((scope) => (ADMIN_API_KEY_SCOPES as readonly string[]).includes(scope))).map((row) => ({ ...row, mailboxIds: allowed.filter((item) => item.keyId === row.id).map((item) => item.mailboxId) })) });
+	return NextResponse.json({ apiKeys: rows.filter((row) => row.kind !== "device" && !parseScopes(row.scopes).some((scope) => (ADMIN_API_KEY_SCOPES as readonly string[]).includes(scope))).map((row) => ({ ...row, mailboxIds: allowed.filter((item) => item.keyId === row.id).map((item) => item.mailboxId) })) });
 }
 
 export async function POST(request: Request) {
@@ -49,7 +49,8 @@ export async function POST(request: Request) {
 		return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
 	}
 
-	const { fullKey, prefix, hash } = generateApiKey();
+	const isAppPassword = parsed.data.scopes.length === 1 && parsed.data.scopes[0] === "jmap";
+	const { fullKey, prefix, hash } = isAppPassword ? generateAppPassword() : generateApiKey();
 	const db = getDb(env);
 	const mailboxIds = [...new Set(parsed.data.mailboxIds)];
 	if (!mailboxIds.length && parsed.data.scopes.some((scope) => !scope.startsWith("calendar:"))) return NextResponse.json({ error: "Choose a mailbox for mail permissions" }, { status: 400 });

@@ -33,6 +33,8 @@ export type Account = {
 	canManageDomains?: boolean;
 	canManageUsers?: boolean;
 	createdAt: string;
+	lastSignInAt?: string | null;
+	deletedAt?: string | null;
 	mailboxId?: string | null;
 	localPart?: string | null;
 	hostname?: string | null;

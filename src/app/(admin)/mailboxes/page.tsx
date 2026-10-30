@@ -3,9 +3,9 @@
 import { mobilePrimaryActionClass } from "@/components/page-header-utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Plus, UsersRound } from "lucide-react";
+import { Plus, UsersRound } from "@/components/icons";
 import { useLanguage } from "@/components/language-provider";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,12 +25,13 @@ import { clearMailboxesCache } from "@/components/mailbox-provider-utils";
 import { ProgressiveAvatarImage } from "@/components/progressive-avatar-image";
 import { authFetch } from "@/lib/auth/client";
 import type { CurrentAccountResponse, Domain, MailboxOwner, MailboxesResponse } from "./types";
-import { getMailboxAddress, getMailboxName } from "./utils";
+import { getMailboxAddress, getMailboxesBase, getMailboxName } from "./utils";
 
 export default function MailboxesPage() {
 	const { t } = useLanguage();
 	const qc = useQueryClient();
 	const router = useRouter();
+	const base = getMailboxesBase(usePathname());
 	const [displayName, setDisplayName] = useState("");
 	const [localPart, setLocalPart] = useState("");
 	const [domainId, setDomainId] = useState("");
@@ -103,7 +104,7 @@ export default function MailboxesPage() {
 			clearMailboxesCache();
 			setCreateOpen(false);
 			qc.invalidateQueries({ queryKey: ["mailboxes"] });
-			if (mailboxType === "shared" && mailboxId) router.push(`/mailboxes/${mailboxId}`);
+			if (mailboxType === "shared" && mailboxId) router.push(`${base}/${mailboxId}`);
 			setMailboxType("personal");
 		},
 	});
@@ -249,7 +250,7 @@ export default function MailboxesPage() {
 						return (
 							<ListRow key={mailbox.id} asChild>
 								<Link
-									href={`/mailboxes/${mailbox.id}`}
+									href={`${base}/${mailbox.id}`}
 									className="group px-5 py-4 transition-colors hover:bg-blue-50/40"
 								>
 									<span className="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full bg-blue-100 text-sm font-semibold text-blue-700">

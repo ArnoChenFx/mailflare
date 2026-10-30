@@ -2,7 +2,7 @@
 
 import { useLanguage } from "@/components/language-provider";
 import { useEffect, useRef, useState } from "react";
-import { prepareEmailHtml } from "@/lib/email/html";
+import { prepareReaderEmailHtml } from "@/lib/remote-images/reader";
 import { collapseQuotedEmailHtml } from "@/app/(dashboard)/inbox/[messageId]/quote-collapse-utils";
 
 const BASE_STYLE = `
@@ -16,15 +16,19 @@ const BASE_STYLE = `
 .email-quote-content { display:flow-root; }
 `;
 
-export function EmailHtmlRenderer({ html, className, preserveLeadingQuote = false }: {
+export function EmailHtmlRenderer({ html, className, preserveLeadingQuote = false, autoAllowRemote = false, onAllowRemote }: {
 	html: string; className?: string; preserveLeadingQuote?: boolean;
+	/** Load remote content without a click; the reader can still block it. */
+	autoAllowRemote?: boolean;
+	/** Called when the reader chooses to load remote content. */
+	onAllowRemote?: () => void;
 }) {
 	const { t } = useLanguage();
 	const quoteToggleLabel = t("message.quote.toggle");
 	const host = useRef<HTMLDivElement>(null);
-	const [allowedSource, setAllowedSource] = useState<string | null>(null);
+	const [choice, setChoice] = useState<{ source: string; allow: boolean } | null>(null);
 	const [hasRemote, setHasRemote] = useState(false);
-	const allowRemote = allowedSource === html;
+	const allowRemote = choice?.source === html ? choice.allow : autoAllowRemote;
 	// Mail is authored for white paper. Under the dark theme it is inverted
 	// (images inverted back) instead of glaring as a white slab.
 	useEffect(() => {
@@ -39,7 +43,11 @@ export function EmailHtmlRenderer({ html, className, preserveLeadingQuote = fals
 		if (!host.current) return;
 		host.current.dir = document.documentElement.dir || "ltr";
 		const root = host.current.shadowRoot ?? host.current.attachShadow({ mode: "open" });
-		const prepared = prepareEmailHtml(html, { reader: true, allowRemote });
+		const prepared = prepareReaderEmailHtml(html, {
+			reader: true,
+			allowRemote,
+			proxyRemote: document.documentElement.dataset.remoteImageProxy !== "disabled",
+		});
 		setHasRemote(prepared.hasRemote);
 		const base = document.createElement("style");
 		base.textContent = `${BASE_STYLE}\n${prepared.rootTag} { display:block; font:14px/1.5 Arial,sans-serif; color:#202124; background:#fff; color-scheme:light; }\n${prepared.bodyTag} { display:block; }\n:host(.mf-dark) ${prepared.rootTag} { background:transparent; }`;
@@ -68,8 +76,11 @@ export function EmailHtmlRenderer({ html, className, preserveLeadingQuote = fals
 	return <div className={`min-w-0 max-w-full ${className ?? ""}`}>
 		{hasRemote && <div className="mb-2 flex justify-end">
 			<button type="button" aria-pressed={allowRemote} className="rounded px-2 py-1 text-xs text-blue-600 hover:bg-blue-50"
-				onClick={() => setAllowedSource(allowRemote ? null : html)}>
-				{allowRemote ? t("message.blockRemote") : t("message.allowRemote")}
+				onClick={() => {
+					if (!allowRemote) onAllowRemote?.();
+					setChoice({ source: html, allow: !allowRemote });
+				}}>
+				{allowRemote ? null : t("message.allowRemote")}
 			</button>
 		</div>}
 		<div className="max-w-full overflow-x-auto" ref={host} />

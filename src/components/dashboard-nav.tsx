@@ -19,7 +19,7 @@ import {
   ShieldAlert,
   Star,
   Trash2,
-} from "lucide-react";
+} from "@/components/icons";
 import { useSelectedMailbox } from "@/components/mailbox-provider";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,7 +33,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useMessageCounts } from "@/hooks/use-message-counts";
-import { authFetch } from "@/lib/auth/client";
+import { AUTH_SESSION_CHANGED_EVENT, authFetch } from "@/lib/auth/client";
+import { getMailboxFolders, invalidateFolderCache } from "@/lib/folders/client";
 import {
   DEFAULT_FOLDER_COLOR,
   FOLDER_COLOR_OPTIONS,
@@ -97,7 +98,7 @@ function NavToggle({ expanded, onClick, collapsedLabel, expandedLabel }: { expan
 
 export function DashboardNav({ className }: { className?: string }) {
   const { t } = useLanguage();
-  const { minimal } = useSidebar();
+  const { minimal, mobile } = useSidebar();
   const pathname = usePathname();
   const [moreOpen, setMoreOpen] = useState(false);
   const [foldersOpen, setFoldersOpen] = useState(false);
@@ -162,6 +163,12 @@ export function DashboardNav({ className }: { className?: string }) {
     setFoldersOpen(readStorage(FOLDERS_OPEN_KEY, false));
   }, []);
 
+  useEffect(() => {
+    const reset = () => setFolders([]);
+    window.addEventListener(AUTH_SESSION_CHANGED_EVENT, reset);
+    return () => window.removeEventListener(AUTH_SESSION_CHANGED_EVENT, reset);
+  }, []);
+
   function toggleMore() {
     writeStorage(MORE_OPEN_KEY, !moreOpen);
     setMoreOpen(!moreOpen);
@@ -187,11 +194,7 @@ export function DashboardNav({ className }: { className?: string }) {
     }
 
     let cancelled = false;
-    const params = new URLSearchParams({ mailboxId: selectedMailbox.id });
-    authFetch(`/api/folders?${params.toString()}`)
-      .then(
-        (response) => response.json() as Promise<{ folders?: CustomFolder[] }>,
-      )
+    getMailboxFolders<{ folders?: CustomFolder[] }>(selectedMailbox.id)
       .then((data) => {
         if (!cancelled) setFolders(data.folders ?? []);
       })
@@ -221,6 +224,7 @@ export function DashboardNav({ className }: { className?: string }) {
       });
       if (!response.ok) return;
       const folder = (await response.json()) as CustomFolder;
+      invalidateFolderCache();
       setFolders((items) =>
         [...items, folder].sort((a, b) => a.name.localeCompare(b.name)),
       );
@@ -234,7 +238,7 @@ export function DashboardNav({ className }: { className?: string }) {
 
   return (
     <SidebarScaffold className={className} header={<SidebarHeader href="/inbox" />} footer={<SidebarFooter />}>
-      {composeLink && <NavItem labelClassName="font-medium" link={composeLink} />}
+      {composeLink && !mobile && <NavItem labelClassName="font-medium" link={composeLink} />}
       {minimal && <hr className="mx-6 my-2 border-neutral-200/70" />}
       <ReorderableList
         storageKey="mailflare:nav:layout"

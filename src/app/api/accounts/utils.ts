@@ -24,6 +24,8 @@ export function listAccountsForAdmin(db: Db) {
 			canManageDomains: users.canManageDomains,
 			canManageUsers: users.canManageUsers,
 			createdAt: users.createdAt,
+			lastSignInAt: users.lastSignInAt,
+			deletedAt: users.deletedAt,
 		})
 		.from(users)
 		.orderBy(desc(users.createdAt));
@@ -60,6 +62,8 @@ export function accountListItemFromUser(user: {
 	canManageDomains?: boolean;
 	canManageUsers?: boolean;
 	createdAt: Date;
+	lastSignInAt?: Date | null;
+	deletedAt?: Date | null;
 }) {
 	return {
 		id: user.id,
@@ -74,6 +78,8 @@ export function accountListItemFromUser(user: {
 		canManageDomains: !!user.canManageDomains,
 		canManageUsers: !!user.canManageUsers,
 		createdAt: user.createdAt,
+		lastSignInAt: user.lastSignInAt ?? null,
+		deletedAt: user.deletedAt ?? null,
 	};
 }
 

@@ -2,14 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
-import { Search } from "lucide-react";
+import { Search } from "@/components/icons";
 import { Input } from "@/components/ui/input";
 import type { HeaderSearchProps } from "./header-search-types";
 
 // The header search shared by every layout. On phones it is an icon beside the menu button
 // until tapped, then covers the header at full width; the wrapper still fills the row so
 // whatever follows it stays pushed to the right.
-export function HeaderSearch({ value, onChange, label, placeholder, onSubmit, trailing, inputProps }: HeaderSearchProps) {
+export function HeaderSearch({ value, onChange, label, placeholder, onSubmit, trailing, inputProps, mobileEnd }: HeaderSearchProps) {
 	const [expanded, setExpanded] = useState(false);
 	const inputRef = useRef<HTMLInputElement>(null);
 
@@ -18,7 +18,7 @@ export function HeaderSearch({ value, onChange, label, placeholder, onSubmit, tr
 	}, [expanded]);
 
 	return (
-		<div className="flex min-w-0 flex-1 items-center">
+		<div className={clsx("flex min-w-0 flex-1 items-center", mobileEnd && !expanded && "max-md:justify-end")}>
 			<button
 				type="button"
 				onClick={() => setExpanded(true)}
