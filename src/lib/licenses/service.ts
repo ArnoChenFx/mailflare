@@ -9,6 +9,15 @@ import { hashLicenseKey, normalizeLicensePlan, parseFeatures } from "./utils";
 
 const LICENSE_SETTINGS_ID = "default";
 
+// This self-hosted fork includes Pro capabilities independently of paid license
+// activation. Team mailbox sharing still requires an active Team license.
+const SELF_HOSTED_PRO_ENTITLEMENTS = {
+	canCustomizeBranding: true,
+	canManageAccounts: true,
+	canForwardEmail: true,
+	accountSeatLimit: null,
+} as const;
+
 async function getOrCreateLicenseSettings(env: CloudflareEnv) {
 	const db = getDb(env);
 	// Read first: the common path is a licensed or already-initialized install,
@@ -55,17 +64,13 @@ export async function getLicenseStatus(env: CloudflareEnv): Promise<LicenseStatu
 export async function getLicenseEntitlements(env: CloudflareEnv): Promise<LicenseEntitlements> {
 	try {
 		const status = await getLicenseStatus(env);
-		// Pro adds accounts up to its seat limit; Team is unlimited and also unlocks shared mailboxes.
 		return {
+			...SELF_HOSTED_PRO_ENTITLEMENTS,
 			plan: status.plan,
-			canCustomizeBranding: status.active,
-			canManageAccounts: status.active,
 			canShareMailboxes: status.active && status.plan === "team",
-			accountSeatLimit: status.seatLimit,
-			canForwardEmail: status.active,
 		};
 	} catch {
-		return { plan: "community", canCustomizeBranding: false, canManageAccounts: false, canShareMailboxes: false, accountSeatLimit: 0, canForwardEmail: false };
+		return { ...SELF_HOSTED_PRO_ENTITLEMENTS, plan: "community", canShareMailboxes: false };
 	}
 }
 

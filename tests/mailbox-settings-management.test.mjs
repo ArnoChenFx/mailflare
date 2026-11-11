@@ -191,12 +191,13 @@ test("owners and shared mailbox grants keep their existing settings permissions"
 	assert.equal((await f.patch("sam", "m-shared", { displayName: "Shared Updated" })).status, 200);
 });
 
-test("administrative mailbox settings preserve the account license requirement", async t => {
+test("self-hosted administrative mailbox settings are available without a paid license", async t => {
 	for (const plan of ["community", "pro"]) {
 		const f = await fixture(t, plan);
-		assert.equal((await f.read("primary", "m-sam")).status, plan === "pro" ? 200 : 404);
-		assert.equal((await f.patch("primary", "m-sam", { displayName: "Licensed" })).status, plan === "pro" ? 200 : 404);
+		assert.equal((await f.read("primary", "m-sam")).status, 200);
+		assert.equal((await f.patch("primary", "m-sam", { displayName: "Managed" })).status, 200);
 		assert.equal((await f.patch("sam", "m-sales", { displayName: "My Sales" })).status, 200);
+		assert.equal((await f.patch("remote", "m-sam", { displayName: "Denied" })).status, 404);
 	}
 });
 
