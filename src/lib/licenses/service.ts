@@ -4,6 +4,7 @@ import { getDb } from "@/db";
 import { licenseSettings } from "@/db/schema";
 import { LICENSE_PRODUCT_IDS } from "./constants";
 import { callPaymugLicenseApi } from "./paymug";
+import { getEnvironmentLicenseEntitlements } from "./plan-env";
 import type { LicenseEntitlements, LicensePlan, LicenseStatus, PaymugLicenseAction } from "./types";
 import { hashLicenseKey, normalizeLicensePlan, parseFeatures } from "./utils";
 
@@ -53,6 +54,8 @@ export async function getLicenseStatus(env: CloudflareEnv): Promise<LicenseStatu
 }
 
 export async function getLicenseEntitlements(env: CloudflareEnv): Promise<LicenseEntitlements> {
+	const override = getEnvironmentLicenseEntitlements(env);
+	if (override) return override;
 	try {
 		const status = await getLicenseStatus(env);
 		// Pro adds accounts up to its seat limit; Team is unlimited and also unlocks shared mailboxes.
