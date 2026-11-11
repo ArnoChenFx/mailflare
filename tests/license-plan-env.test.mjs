@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const directory = mkdtempSync(join(root, "node_modules", "self-hosted-pro-test-"));
+const directory = mkdtempSync(join(root, "node_modules", "license-plan-env-test-"));
 after(() => rmSync(directory, { recursive: true, force: true }));
 await build({
 	stdin: {
@@ -22,7 +22,7 @@ await build({
 			export * as mailboxes from "./src/app/api/mailboxes/route.ts";
 		`,
 		resolveDir: root,
-		sourcefile: "self-hosted-pro-test-entry.ts",
+		sourcefile: "license-plan-env-test-entry.ts",
 	},
 	outfile: join(directory, "entry.mjs"),
 	bundle: true,
@@ -37,7 +37,7 @@ await build({
 const { SqliteDatabase, applyMigrations, createSession, getLicenseStatus, getLicenseEntitlements,
 	getAccountForwardingDestination, accounts, branding, forwarding, mailboxes } = await import(pathToFileURL(join(directory, "entry.mjs")).href);
 
-async function fixture(t, plan = "community", state = "inactive") {
+async function fixture(t, override, plan = "community", state = "inactive") {
 	const database = new SqliteDatabase(":memory:");
 	t.after(() => database.db.close());
 	await applyMigrations(database, join(root, "drizzle/migrations"));
@@ -53,7 +53,7 @@ async function fixture(t, plan = "community", state = "inactive") {
 	`);
 	sql.prepare("INSERT INTO license_settings (id, instance_id, plan, state, seat_limit, updated_at) VALUES ('default', 'self-hosted-test', ?, ?, 1, 1)").run(plan, state);
 	const objects = new Map();
-	const env = { DB: database, MAILFLARE_RUNTIME: "node", BUCKET: {
+	const env = { DB: database, MAILFLARE_RUNTIME: "node", MAILFLARE_LICENSE_PLAN: override, BUCKET: {
 		async put(key, data) { objects.set(key, new Uint8Array(data)); },
 	} };
 	globalThis.__mailflareNodeEnv = env;
@@ -69,9 +69,9 @@ async function fixture(t, plan = "community", state = "inactive") {
 	return { sql, env, objects, request };
 }
 
-test("self-hosted administrators can create accounts beyond paid seat limits", async t => {
-	for (const [plan, state] of [["community", "inactive"], ["pro", "active"]]) {
-		const f = await fixture(t, plan, state);
+test("Pro and Team overrides allow account creation without a paid license or seat limit", async t => {
+	for (const override of ["pro", "team"]) {
+		const f = await fixture(t, override);
 		const response = await accounts.POST(f.request("owner", "/api/accounts", "POST", {
 			username: "new-member", domainId: "domain", password: "test-only-password", role: "user",
 		}));
@@ -84,8 +84,8 @@ test("self-hosted administrators can create accounts beyond paid seat limits", a
 	}
 });
 
-test("custom branding can be saved without a paid license and still requires the primary admin", async t => {
-	const f = await fixture(t);
+test("Pro override enables branding while preserving primary-admin authorization", async t => {
+	const f = await fixture(t, "pro");
 	const form = () => {
 		const body = new FormData();
 		body.set("appName", "My Mail");
@@ -99,24 +99,33 @@ test("custom branding can be saved without a paid license and still requires the
 	assert.deepEqual([...f.objects.get("branding/app-icon")], [1, 2, 3]);
 });
 
-test("account forwarding can be configured and resolved without a paid license", async t => {
-	const f = await fixture(t);
+test("runtime plan changes gate forwarding without deleting its saved destination", async t => {
+	const f = await fixture(t, "pro");
 	const destination = "archive@external.test";
 	const response = await forwarding.PATCH(f.request("member", "/api/settings/forwarding", "PATCH", { forwardingEmail: destination }));
 	assert.equal(response.status, 200);
 	assert.equal(await getAccountForwardingDestination(f.env, "member@example.test"), destination);
 	assert.equal(f.sql.prepare("SELECT forwarding_email FROM users WHERE id='owner'").get().forwarding_email, null);
+	f.env.MAILFLARE_LICENSE_PLAN = "community";
+	assert.equal(await getAccountForwardingDestination(f.env, "member@example.test"), null);
+	assert.equal((await forwarding.PATCH(f.request("member", "/api/settings/forwarding", "PATCH", { forwardingEmail: "changed@external.test" }))).status, 403);
+	f.env.MAILFLARE_LICENSE_PLAN = "team";
+	assert.equal(await getAccountForwardingDestination(f.env, "member@example.test"), destination);
 });
 
-test("Team sharing remains tied to real activation and paid license status stays accurate", async t => {
+test("unset override preserves upstream license status, entitlements and Pro seat limits", async t => {
 	for (const [plan, state] of [["community", "inactive"], ["pro", "active"], ["team", "active"], ["team", "expired"]]) {
-		const f = await fixture(t, plan, state);
+		const f = await fixture(t, undefined, plan, state);
 		const active = state === "active";
 		const status = await getLicenseStatus(f.env);
 		assert.equal(status.active, active);
 		assert.equal(status.plan, active ? plan : "community");
 		const entitlements = await getLicenseEntitlements(f.env);
+		assert.equal(entitlements.canCustomizeBranding, active);
+		assert.equal(entitlements.canManageAccounts, active);
+		assert.equal(entitlements.canForwardEmail, active);
 		assert.equal(entitlements.canShareMailboxes, active && plan === "team");
+		assert.equal(entitlements.accountSeatLimit, active && plan === "pro" ? 1 : null);
 		if (plan !== "team" || !active) {
 			const response = await mailboxes.POST(f.request("owner", "/api/mailboxes", "POST", {
 				domainId: "domain", localPart: "support", type: "shared",
@@ -126,8 +135,40 @@ test("Team sharing remains tied to real activation and paid license status stays
 	}
 });
 
-test("unavailable license storage does not disable local Pro features or grant Team sharing", async t => {
-	const f = await fixture(t);
+test("explicit overrides take precedence over an active Team license without changing its stored state", async t => {
+	const f = await fixture(t, "community", "team", "active");
+	for (const override of ["community", "pro", "team"]) {
+		f.env.MAILFLARE_LICENSE_PLAN = override;
+		const response = await accounts.GET(f.request("owner", "/api/accounts"));
+		assert.equal(response.status, override === "community" ? 403 : 200);
+		const shared = await mailboxes.POST(f.request("owner", "/api/mailboxes", "POST", {
+			domainId: "domain", localPart: "support", type: "shared",
+		}));
+		assert.equal(shared.status, override === "team" ? 200 : 403);
+		const status = await getLicenseStatus(f.env);
+		assert.equal(status.plan, "team");
+		assert.equal(status.active, true);
+	}
+	assert.equal(f.sql.prepare("SELECT count(*) AS total FROM users").get().total, 2);
+	f.env.MAILFLARE_LICENSE_PLAN = "community";
+	assert.equal((await getLicenseEntitlements(f.env)).accountSeatLimit, 1);
+	assert.equal((await getLicenseEntitlements(f.env)).canCustomizeBranding, false);
+});
+
+test("plan parsing tolerates case and whitespace and ignores empty or unknown overrides", async t => {
+	const f = await fixture(t, "  TeAm  ", "pro", "active");
+	assert.equal((await getLicenseEntitlements(f.env)).canShareMailboxes, true);
+	for (const override of ["", "  ", "unknown", "t eam"]) {
+		f.env.MAILFLARE_LICENSE_PLAN = override;
+		const entitlements = await getLicenseEntitlements(f.env);
+		assert.equal(entitlements.plan, "pro");
+		assert.equal(entitlements.accountSeatLimit, 1);
+		assert.equal(entitlements.canShareMailboxes, false);
+	}
+});
+
+test("valid overrides work when license storage is unavailable", async t => {
+	const f = await fixture(t, "pro");
 	f.sql.exec("DROP TABLE license_settings");
 	const response = await accounts.GET(f.request("owner", "/api/accounts"));
 	assert.equal(response.status, 200);
@@ -136,4 +177,8 @@ test("unavailable license storage does not disable local Pro features or grant T
 	form.set("appName", "My Mail");
 	assert.equal((await branding.PUT(f.request("owner", "/api/branding", "PUT", form))).status, 200);
 	assert.equal((await getLicenseEntitlements(f.env)).canShareMailboxes, false);
+	f.env.MAILFLARE_LICENSE_PLAN = "team";
+	assert.equal((await getLicenseEntitlements(f.env)).canShareMailboxes, true);
+	delete f.env.MAILFLARE_LICENSE_PLAN;
+	assert.equal((await accounts.GET(f.request("owner", "/api/accounts"))).status, 403);
 });

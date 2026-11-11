@@ -55,13 +55,6 @@ Mailflare currently supports 34 languages, including English, Português (Brasil
 
 ## Cost
 
-This self-hosted fork includes custom branding, account management without a seat
-limit, and account email forwarding without a paid Pro license. Administrator
-permissions still apply. Shared mailboxes and mailbox sharing require an active
-Team license. The license screen continues to report the actual paid license
-status; enabling these local features does not activate a paid license. Upstream
-updates replace fork changes, so preserve or reapply this customization when updating.
-
 You can receive and send mail for free.
 
 - **Receiving**: Cloudflare Email Routing is free.
