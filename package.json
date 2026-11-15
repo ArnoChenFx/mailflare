@@ -1,6 +1,6 @@
 {
   "name": "mailflare",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "private": true,
   "scripts": {
     "dev": "npm run db:bundle && vp dev --port 3000",
@@ -63,6 +63,7 @@
   },
   "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
+    "@ai-sdk/anthropic": "4.0.63",
     "@ai-sdk/openai": "4.0.75",
     "@ai-sdk/openai-compatible": "^3.0.55",
     "@ai-sdk/react": "^4.0.116",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
 import { Copy, Link2, X } from "@/components/icons";
 import { useLanguage } from "@/components/language-provider";
@@ -9,8 +9,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input";
 import { authFetch } from "@/lib/auth/client";
 import type { DriveItemDto, DriveShareDto, DriveShareRole } from "@/lib/drive/types";
+import { Select } from "@/components/ui/select";
 
-const selectClass = "h-10 rounded-md border border-neutral-200 bg-white px-2 text-sm";
+const selectClass = "h-10 text-sm";
 
 export function DriveShareDialog({ item, onClose, onChanged }: { item: DriveItemDto | null; onClose: () => void; onChanged: () => void }) {
 	const { t } = useLanguage();
@@ -21,19 +22,22 @@ export function DriveShareDialog({ item, onClose, onChanged }: { item: DriveItem
 	const [busy, setBusy] = useState(false);
 	const id = item?.id;
 
-	const load = useCallback(async () => {
-		if (!id) return;
-		const response = await authFetch(`/api/drive/items/${id}/shares`);
-		if (!response.ok) return toast.error(t("drive.shareFailed"));
-		const data = await response.json() as { shares: DriveShareDto[]; linkToken: string | null };
-		setShares(data.shares);
-		setLinkToken(data.linkToken);
-	}, [id, t]);
+	// Clear the previous item's sharing state as soon as a different item (or language) is shown.
+	const [loadedFor, setLoadedFor] = useState({ id, t });
+	if (loadedFor.id !== id || loadedFor.t !== t) {
+		setLoadedFor({ id, t });
+		setShares([]); setLinkToken(null); setEmail("");
+	}
 
 	useEffect(() => {
-		setShares([]); setLinkToken(null); setEmail("");
-		void load();
-	}, [load]);
+		if (!id) return;
+		void authFetch(`/api/drive/items/${id}/shares`).then(async (response) => {
+			if (!response.ok) return toast.error(t("drive.shareFailed"));
+			const data = await response.json() as { shares: DriveShareDto[]; linkToken: string | null };
+			setShares(data.shares);
+			setLinkToken(data.linkToken);
+		});
+	}, [id, t]);
 
 	async function request(input: string, init: RequestInit) {
 		setBusy(true);
@@ -73,10 +77,10 @@ export function DriveShareDialog({ item, onClose, onChanged }: { item: DriveItem
 				<DialogHeader><DialogTitle className="pr-6 truncate">{t("drive.shareTitle", { name: item?.name ?? "" })}</DialogTitle></DialogHeader>
 				<form onSubmit={addPerson} className="flex gap-2">
 					<Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder={t("drive.shareEmail")} aria-label={t("drive.shareEmail")} />
-					<select value={role} onChange={(event) => setRole(event.target.value as DriveShareRole)} className={selectClass} aria-label={t("drive.peopleWithAccess")}>
+					<Select value={role} onChange={(event) => setRole(event.target.value as DriveShareRole)} className={selectClass} aria-label={t("drive.peopleWithAccess")}>
 						<option value="view">{t("drive.canView")}</option>
 						<option value="edit">{t("drive.canEdit")}</option>
-					</select>
+					</Select>
 					<Button type="submit" disabled={busy || !email.trim()}>{t("drive.shareAdd")}</Button>
 				</form>
 				<h3 className="mb-2 mt-6 text-sm font-medium text-neutral-900">{t("drive.peopleWithAccess")}</h3>

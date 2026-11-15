@@ -4,7 +4,7 @@ import { mobilePrimaryActionClass } from "@/components/page-header-utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Plus } from "@/components/icons";
 import { useLanguage } from "@/components/language-provider";
 import { Button } from "@/components/ui/button";
@@ -55,11 +55,17 @@ export default function MailboxesPage() {
 		},
 	});
 
-	useEffect(() => {
-		if (!createOpen) return;
-		setDisplayName((currentName) => currentName || account.data?.user?.name?.trim() || "");
-		setOwnerUserId((currentId) => currentId || account.data?.user?.id || "");
-	}, [account.data?.user?.id, account.data?.user?.name, createOpen]);
+	// Prefill empty create fields with the signed-in account when the dialog opens or the account loads.
+	const accountUserId = account.data?.user?.id;
+	const accountUserName = account.data?.user?.name;
+	const [prefilledFor, setPrefilledFor] = useState({ accountUserId, accountUserName, createOpen });
+	if (prefilledFor.accountUserId !== accountUserId || prefilledFor.accountUserName !== accountUserName || prefilledFor.createOpen !== createOpen) {
+		setPrefilledFor({ accountUserId, accountUserName, createOpen });
+		if (createOpen) {
+			setDisplayName(displayName || accountUserName?.trim() || "");
+			setOwnerUserId(ownerUserId || accountUserId || "");
+		}
+	}
 
 	const accounts = useQuery({
 		queryKey: ["accounts", "mailbox-owners"],
@@ -154,7 +160,8 @@ export default function MailboxesPage() {
 										id="mailbox-type"
 										value={mailboxType}
 										onChange={(event) => setMailboxType(event.target.value as "personal" | "shared")}
-										className="flex h-10 w-full rounded-md border border-neutral-200 bg-white px-3 text-sm shadow-sm shadow-neutral-200/50 focus-visible:border-blue-600 focus-visible:outline-none"
+										containerClassName="flex w-full rounded-none border-0 p-0"
+										className="h-10 rounded-md border border-neutral-200 bg-white px-3 text-sm shadow-sm shadow-neutral-200/50 focus-visible:border-blue-600"
 									>
 										<option value="personal">{t("mailboxes.personalInbox")}</option>
 										<option value="shared">{t("mailboxes.sharedInbox")}</option>
@@ -172,7 +179,8 @@ export default function MailboxesPage() {
 										setOwnerUserId(event.target.value);
 										if (owner) setDisplayName(owner.name);
 									}}
-									className="flex h-10 w-full rounded-md border border-neutral-200 bg-white px-3 text-sm shadow-sm shadow-neutral-200/50 focus-visible:border-blue-600 focus-visible:outline-none"
+									containerClassName="flex w-full rounded-none border-0 p-0"
+										className="h-10 rounded-md border border-neutral-200 bg-white px-3 text-sm shadow-sm shadow-neutral-200/50 focus-visible:border-blue-600"
 								>
 									{mailboxOwners.map((owner) => (
 										<option key={owner.id} value={owner.id}>
@@ -208,7 +216,8 @@ export default function MailboxesPage() {
 									<span className="flex items-center text-sm text-neutral-500">@</span>
 									<Select
 										aria-label={t("accounts.domain")}
-										className="min-w-0 max-w-[55%] bg-transparent px-3 text-sm text-neutral-700 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+										containerClassName="max-w-[55%] rounded-none border-0 p-0"
+						className="h-full rounded-none border-0 bg-transparent px-3 text-sm text-neutral-700 shadow-none"
 										value={domainId}
 										onChange={(event) => setDomainId(event.target.value)}
 									>
