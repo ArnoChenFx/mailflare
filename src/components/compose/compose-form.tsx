@@ -62,6 +62,7 @@ export function ComposeForm({
 	const { showNotice, openDraftComposer, isCurrentNotice } = useCompose();
 	const { selectedMailbox, setSelectedMailbox, mailboxes } = useSelectedMailbox();
 	const [draftId, setDraftId] = useState<string | null>(null);
+	const [saveFailed, setSaveFailed] = useState(false);
 	const [agentRevision, setAgentRevision] = useState<number | null>(null);
 	const [agentReview, setAgentReview] = useState<{ approvalId: string; snapshot: ReviewSnapshot } | null>(null);
 	// Recipients handed in by the caller (Contacts "Send email", etc.) seed a fresh composer.
@@ -260,7 +261,9 @@ export function ComposeForm({
 	useEffect(() => {
 		pendingSave.current = null;
 		const bodyContent = htmlToPlainText(html).trim();
-		const signatureOnly = bodyContent === (selectedMailbox?.signature?.trim() ?? "");
+		// Compare text with text: an HTML signature is stored as markup.
+		const signatureContent = htmlToPlainText(applyMailboxSignatureHtml("", "", selectedMailbox?.signature)).trim();
+		const signatureOnly = bodyContent === signatureContent;
 		const hasContent =
 			to.length > 0 || cc.length > 0 || bcc.length > 0 || subject.trim() || quotedHtml || attachments.length > 0 || (bodyContent && !signatureOnly);
 		if (!fromAddr || !hasContent || loadingDraft || reviewInProgressRef.current) return;
@@ -290,7 +293,8 @@ export function ComposeForm({
 					body: JSON.stringify(payload),
 				});
 				const data = (await res.json()) as { draft?: { id: string } };
-				if (!res.ok || !data.draft?.id) return;
+				if (!res.ok || !data.draft?.id) { setSaveFailed(true); return; }
+				setSaveFailed(false);
 				if (generation !== draftGeneration.current) {
 					if (!existingId) void authFetch(`/api/drafts/${data.draft.id}`, { method: "DELETE" });
 					return;
@@ -311,7 +315,7 @@ export function ComposeForm({
 				for (const attachment of pending) uploadedFiles.current.add(attachment.file);
 				setStoredAttachments((current) => [...current, ...(result.attachments ?? [])]);
 				setAttachments((current) => current.filter((attachment) => !uploadedFiles.current.has(attachment.file)));
-			}).catch(() => {});
+			}).catch(() => { setSaveFailed(true); });
 			saveQueue.current = run;
 			return run;
 		};
@@ -389,7 +393,7 @@ export function ComposeForm({
 			return;
 		}
 		let res: Response;
-		let data: SendResult & { error?: string };
+		let data: SendResult & { error?: string; code?: string; addresses?: string[] };
 		try {
 			res = await authFetch("/api/send", {
 				method: "POST",
@@ -404,14 +408,14 @@ export function ComposeForm({
 					html: fullHtml,
 					mailboxId: selectedMailbox?.id,
 					threading: threading ?? undefined,
-					draftId,
+					draftId: currentDraftId,
 					scheduledAt,
 					undoSend: true,
 					trackOpens,
 					followUpDays,
 				}),
 			});
-			data = (await res.json()) as SendResult & { error?: string };
+			data = (await res.json()) as SendResult & { error?: string; code?: string; addresses?: string[] };
 		} catch {
 			setLoading(false);
 			setToast({ type: "error", message: t("compose.error.sendFailed") });
@@ -420,7 +424,11 @@ export function ComposeForm({
 		setLoading(false);
 
 		if (!res.ok) {
-			setToast({ type: "error", message: data.error ?? t("compose.error.sendFailed") });
+			// A suppressed recipient is the one send error with its own translated sentence.
+			const message = data.code === "SUPPRESSED_RECIPIENT" && data.addresses?.length
+				? t("compose.error.suppressed", { addresses: data.addresses.join(", ") })
+				: data.error ?? t("compose.error.sendFailed");
+			setToast({ type: "error", message });
 			return;
 		}
 
@@ -793,14 +801,15 @@ export function ComposeForm({
 				<div
 					role={toast.type === "error" ? "alert" : "status"}
 					className={cn(
-						"fixed right-6 top-6 z-[60] rounded-lg px-4 py-3 text-sm font-medium shadow-lg",
+						"fixed z-[60] max-w-[calc(100vw-3rem)] rounded-lg px-4 py-3 text-sm font-medium shadow-lg",
+						"inset-x-6 bottom-[max(5rem,calc(env(safe-area-inset-bottom,0px)+4.5rem))] md:bottom-6 md:[inset-inline-end:auto] md:[inset-inline-start:calc(var(--sidebar-width,260px)+1.5rem)]",
 						toast.type === "success" ? "bg-green-600 text-white" : "bg-red-600 text-white",
 					)}
 				>
 					{toast.message}
 				</div>
 			)}
-			<form onSubmit={onSubmit} className={cn(frameClass, closing && "compose-sheet-closing")} style={dragY ? { transform: `translateY(${dragY}px)`, transition: "none" } : undefined} ref={formRef} role={modalMode && !minimized ? "dialog" : mode === "popup" ? "region" : undefined} aria-modal={modalMode && !minimized || undefined} aria-label={mode === "popup" ? t("compose.dialogLabel") : undefined} onKeyDown={(event) => { if (modalMode && !minimized && event.key === "Escape") { event.preventDefault(); setModalMode(false); } }} onDragEnterCapture={minimized ? undefined : onFileDragEnter} onDragOverCapture={minimized ? undefined : onFileDragOver} onDragLeaveCapture={minimized ? undefined : onFileDragLeave} onDropCapture={minimized ? undefined : onFileDrop}>
+			<form onSubmit={onSubmit} className={cn(frameClass, closing && "compose-sheet-closing")} data-compose-surface={mode === "popup" ? "" : undefined} style={dragY ? { transform: `translateY(${dragY}px)`, transition: "none" } : undefined} ref={formRef} role={modalMode && !minimized ? "dialog" : mode === "popup" ? "region" : undefined} aria-modal={modalMode && !minimized || undefined} aria-label={mode === "popup" ? t("compose.dialogLabel") : undefined} onKeyDown={(event) => { if (modalMode && !minimized && event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); setModalMode(false); } }} onDragEnterCapture={minimized ? undefined : onFileDragEnter} onDragOverCapture={minimized ? undefined : onFileDragOver} onDragLeaveCapture={minimized ? undefined : onFileDragLeave} onDropCapture={minimized ? undefined : onFileDrop}>
 				{draggingFiles && !minimized && (
 					<div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center border-2 border-dashed border-blue-400 bg-blue-50/90 text-sm font-medium text-blue-700" aria-hidden="true">
 						{t("compose.dropFiles")}
@@ -816,7 +825,7 @@ export function ComposeForm({
 								? t("compose.title.reply")
 								: /^fwd?:/i.test(subject)
 									? t("compose.title.forward")
-									: draftId
+									: draftId && !saveFailed
 										? t("compose.title.saved")
 										: t("compose.title.new")}
 					</span>
