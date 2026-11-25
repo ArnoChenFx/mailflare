@@ -1,12 +1,18 @@
 import { NextResponse } from "next/server";
+import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
+import { contacts } from "@/db/schema";
 import { requireUser } from "@/lib/auth/cookies";
+import { deleteAvatarImages } from "@/lib/avatar-images";
 import { getEnv } from "@/lib/cloudflare";
 import { normalizeEmailAddress } from "@/lib/email/address";
+import { importGravatarAvatar } from "@/lib/contacts/gravatar";
 import { getMailboxAccessLevel } from "@/lib/mailboxes/access";
 import { getPersonalIdentityForAddress, syncPersonalIdentity } from "@/lib/profile/sync";
+import { parseAddress } from "@/lib/utils";
 import type { ContactRequestInput } from "./types";
-import { getContactByEmail, saveManualContactName, toContactDetails } from "./utils";
+import { addressesSeenInMailbox, CONTACTS_LIST_MAX_LIMIT, getContactByEmail, getContactDetailsData, listContacts, parseContactsLimit, saveManualContact, toContactDetails } from "./utils";
+import { readJsonObject } from "@/lib/http/request";
 
 export async function GET(request: Request) {
 	const env = getEnv();
@@ -14,7 +20,7 @@ export async function GET(request: Request) {
 	const url = new URL(request.url);
 	const mailboxId = url.searchParams.get("mailboxId");
 	const email = normalizeEmailAddress(url.searchParams.get("address") ?? "");
-	if (!mailboxId || !email) {
+	if (!mailboxId) {
 		return NextResponse.json({ error: "Mailbox and contact are required" }, { status: 400 });
 	}
 
@@ -23,7 +29,35 @@ export async function GET(request: Request) {
 	if (!access?.canRead) {
 		return NextResponse.json({ error: "Mailbox not found" }, { status: 404 });
 	}
+
+	// No address means a listing: the search box on the Contacts page and the
+	// composer's suggestions both read this shape.
+	// A delegate of a shared mailbox is not the owner of its contacts: they only see addresses on its mail.
+	const ownerOnly = !access.isOwner;
+	if (!email) {
+		const limit = parseContactsLimit(url.searchParams.get("limit"));
+		let rows = await listContacts(db, {
+			userId: access.mailbox.userId,
+			query: (url.searchParams.get("q") ?? "").trim(),
+			limit: ownerOnly ? CONTACTS_LIST_MAX_LIMIT : limit,
+		});
+		if (ownerOnly) {
+			const seen = await addressesSeenInMailbox(db, access.mailbox.id, rows.map((contact) => contact.email), user.id);
+			rows = rows.filter((contact) => seen.has(contact.email)).slice(0, limit);
+		}
+		return NextResponse.json({
+			contacts: rows.map((contact) => toContactDetails(contact)),
+		});
+	}
+
+	if (ownerOnly && !(await addressesSeenInMailbox(db, access.mailbox.id, [email], user.id)).has(email)) {
+		return NextResponse.json({ contact: { email, displayName: null, hasAvatar: false, source: null, blocked: false, lastSeenAt: null } });
+	}
+
 	const storedContact = toContactDetails(await getContactByEmail(db, access.mailbox.userId, email));
+	// Phones, addresses, notes and so on from an import: private to the address book's owner. A delegate of a shared
+	// mailbox, even with full access, gets the contact without them. One extra read, single lookup only.
+	const details = storedContact && access.isOwner ? await getContactDetailsData(db, access.mailbox.userId, email) : null;
 	const account = await getPersonalIdentityForAddress(db, access.mailbox.userId, email);
 	const contact = account
 		? {
@@ -37,7 +71,7 @@ export async function GET(request: Request) {
 			}
 		: storedContact;
 	return NextResponse.json({
-		contact: contact ?? {
+		contact: contact ? { ...contact, ...(details ? { details } : {}) } : {
 			email,
 			displayName: null,
 			hasAvatar: false,
@@ -48,10 +82,53 @@ export async function GET(request: Request) {
 	});
 }
 
+export async function POST(request: Request) {
+	const env = getEnv();
+	const user = await requireUser(env, request);
+	const body = await readJsonObject<ContactRequestInput>(request);
+	if (!body) return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+	const email = normalizeEmailAddress(body.address ?? "");
+	const displayName = body.displayName?.trim() || null;
+	if (!body.mailboxId || !parseAddress(email) || (displayName && displayName.length > 100)) {
+		return NextResponse.json({ error: "A valid contact is required" }, { status: 400 });
+	}
+
+	const db = getDb(env);
+	const access = await getMailboxAccessLevel(db, user, body.mailboxId);
+	if (!access?.canManage) {
+		return NextResponse.json({ error: "Mailbox not found" }, { status: 404 });
+	}
+
+	// The address can be one of the user's own accounts; keep its name in step like PATCH does.
+	const account = await getPersonalIdentityForAddress(db, access.mailbox.userId, email);
+	if (account && account.userId === user.id && displayName) {
+		await syncPersonalIdentity(db, {
+			userId: account.userId,
+			name: displayName,
+			avatarKey: account.avatarKey,
+		});
+	}
+	const existing = await getContactByEmail(db, access.mailbox.userId, email);
+	const saved = await saveManualContact(db, {
+		userId: access.mailbox.userId,
+		email,
+		displayName,
+	});
+	if (!existing && saved) {
+		const avatarKey = await importGravatarAvatar(env, access.mailbox.userId, email);
+		if (avatarKey) {
+			await db.update(contacts).set({ avatarKey }).where(eq(contacts.id, saved.id));
+			return NextResponse.json({ contact: { ...toContactDetails(saved), hasAvatar: true } });
+		}
+	}
+	return NextResponse.json({ contact: toContactDetails(saved) });
+}
+
 export async function PATCH(request: Request) {
 	const env = getEnv();
 	const user = await requireUser(env, request);
-	const body = (await request.json()) as ContactRequestInput;
+	const body = await readJsonObject<ContactRequestInput>(request);
+	if (!body) return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
 	const email = normalizeEmailAddress(body.address ?? "");
 	const displayName = body.displayName?.trim() ?? "";
 	if (!body.mailboxId || !email || !displayName || displayName.length > 100) {
@@ -74,10 +151,41 @@ export async function PATCH(request: Request) {
 			avatarKey: account.avatarKey,
 		});
 	}
-	const contact = toContactDetails(await saveManualContactName(db, {
+	const contact = toContactDetails(await saveManualContact(db, {
 		userId: access.mailbox.userId,
 		email,
 		displayName,
 	}));
 	return NextResponse.json({ contact });
+}
+
+export async function DELETE(request: Request) {
+	const env = getEnv();
+	const user = await requireUser(env, request);
+	const url = new URL(request.url);
+	const mailboxId = url.searchParams.get("mailboxId");
+	const email = normalizeEmailAddress(url.searchParams.get("address") ?? "");
+	if (!mailboxId || !email) {
+		return NextResponse.json({ error: "Mailbox and contact are required" }, { status: 400 });
+	}
+
+	const db = getDb(env);
+	const access = await getMailboxAccessLevel(db, user, mailboxId);
+	if (!access?.canManage) {
+		return NextResponse.json({ error: "Mailbox not found" }, { status: 404 });
+	}
+
+	// The owner's own address carries their account avatar; only they may remove it, as PATCH requires.
+	const account = await getPersonalIdentityForAddress(db, access.mailbox.userId, email);
+	if (account && account.userId !== user.id) {
+		return NextResponse.json({ error: "Only the account owner can change this contact" }, { status: 403 });
+	}
+	const existing = await getContactByEmail(db, access.mailbox.userId, email);
+	if (existing?.avatarKey) {
+		await deleteAvatarImages(env.BUCKET, existing.avatarKey);
+	}
+	await db
+		.delete(contacts)
+		.where(and(eq(contacts.userId, access.mailbox.userId), eq(contacts.email, email)));
+	return NextResponse.json({ ok: true });
 }

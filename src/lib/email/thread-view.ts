@@ -1,9 +1,10 @@
 import { and, asc, eq, inArray, isNull, ne, notInArray, or } from "drizzle-orm";
 import { getDb } from "@/db";
 import { messageAttachments, messages } from "@/db/schema";
-import { getContactAvatarMap, getContactDisplayNameMap } from "@/lib/contacts/service";
-import { getSenderDisplayName } from "@/lib/contacts/utils";
+import { getContactCardMap } from "@/lib/contacts/service";
+import { getPartyDisplayName } from "@/lib/contacts/utils";
 import { getFirstEmailAddressEntry, normalizeEmailAddress } from "@/lib/email/address";
+import { draftsVisibleTo, isOthersDraft } from "@/lib/email/draft-access";
 import { getMailboxAccessLevel } from "@/lib/mailboxes/access";
 import type { SessionUser } from "@/lib/auth/types";
 
@@ -23,11 +24,11 @@ function withoutRawKey<T extends { rawR2Key: string | null }>(row: T): Omit<T, "
 export async function getMessageThreadForUser(env: CloudflareEnv, user: SessionUser, messageId: string) {
 	const db = getDb(env);
 	const [message] = await db
-		.select({ mailboxId: messages.mailboxId, userId: messages.userId, threadId: messages.threadId })
+		.select({ mailboxId: messages.mailboxId, userId: messages.userId, threadId: messages.threadId, status: messages.status, privateDraft: messages.privateDraft })
 		.from(messages)
 		.where(eq(messages.id, messageId))
 		.limit(1);
-	if (!message?.mailboxId) return null;
+	if (!message?.mailboxId || isOthersDraft(message, user.id)) return null;
 	const access = await getMailboxAccessLevel(db, user, message.mailboxId);
 	if (!access?.canRead) return null;
 
@@ -40,6 +41,8 @@ export async function getMessageThreadForUser(env: CloudflareEnv, user: SessionU
 						eq(messages.mailboxId, message.mailboxId),
 						eq(messages.threadId, message.threadId),
 						notInArray(messages.status, ["draft", "trash"]),
+						// Another user's draft filed under Archive or a folder is still their private draft.
+						draftsVisibleTo(user.id),
 						// Spam stays out of a conversation unless it is the message being opened.
 						or(ne(messages.status, "spam"), eq(messages.id, messageId)),
 					),
@@ -49,20 +52,15 @@ export async function getMessageThreadForUser(env: CloudflareEnv, user: SessionU
 		: await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
 
 	const ids = rows.map((row) => row.id);
-	const attachmentRows = ids.length
-		? await db
-				.select({
-					id: messageAttachments.id,
-					messageId: messageAttachments.messageId,
-					filename: messageAttachments.filename,
-					type: messageAttachments.contentType,
-					size: messageAttachments.size,
-					disposition: messageAttachments.disposition,
-					contentId: messageAttachments.contentId,
-				})
-				.from(messageAttachments)
-				.where(and(inArray(messageAttachments.messageId, ids), isNull(messageAttachments.trashedAt)))
-		: [];
+	const attachmentQuery = ids.length ? listThreadAttachments(db, ids) : null;
+	const [attachmentRows, contactMap] = await Promise.all([
+		attachmentQuery ?? Promise.resolve([]),
+		getContactCardMap(
+			env,
+			message.userId,
+			rows.flatMap((row) => [row.fromAddr, getFirstEmailAddressEntry(row.toAddr)]),
+		),
+	]);
 	const attachmentsByMessage = new Map<string, typeof attachmentRows>();
 	for (const attachment of attachmentRows) {
 		const list = attachmentsByMessage.get(attachment.messageId) ?? [];
@@ -70,26 +68,42 @@ export async function getMessageThreadForUser(env: CloudflareEnv, user: SessionU
 		attachmentsByMessage.set(attachment.messageId, list);
 	}
 
-	const contactMap = await getContactDisplayNameMap(
-		env,
-		message.userId,
-		rows.flatMap((row) => [row.fromAddr, getFirstEmailAddressEntry(row.toAddr)]),
-	);
-	const contactAvatarMap = await getContactAvatarMap(
-		env,
-		message.userId,
-		rows.map((row) => row.fromAddr),
-	);
-
 	return {
 		threadId: message.threadId,
-		messages: rows.map((row) => ({
-			...withoutRawKey(row),
-			fromContactName: getSenderDisplayName(row.fromAddr, contactMap.get(normalizeEmailAddress(row.fromAddr))),
-			fromContactHasAvatar: contactAvatarMap.get(normalizeEmailAddress(row.fromAddr)) ?? false,
-			toContactName:
-				contactMap.get(normalizeEmailAddress(getFirstEmailAddressEntry(row.toAddr)))?.displayName ?? null,
-			attachments: attachmentsByMessage.get(row.id) ?? [],
-		})),
+		messages: rows.map((row) => {
+			const contact = contactMap.get(normalizeEmailAddress(row.fromAddr));
+			const firstTo = getFirstEmailAddressEntry(row.toAddr);
+			return {
+				...withoutRawKey(row),
+				// The reader already fetched the open message; its thread copy does not need the body again.
+				...(row.id === messageId ? { textBody: null, htmlBody: null } : {}),
+				fromContactName: getPartyDisplayName(row.fromAddr, contact),
+				fromContactHasAvatar: contact?.hasAvatar ?? false,
+				toContactName: getPartyDisplayName(firstTo, contactMap.get(normalizeEmailAddress(firstTo))),
+				attachments: attachmentsByMessage.get(row.id) ?? [],
+			};
+		}),
 	};
+}
+
+// D1 caps bound parameters per statement at 100 and a thread can hold up to 200 messages.
+const ATTACHMENT_ID_CHUNK = 90;
+
+/** Attachments for the given messages, queried in chunks that fit D1's parameter limit. */
+async function listThreadAttachments(db: ReturnType<typeof getDb>, ids: string[]) {
+	const chunks: string[][] = [];
+	for (let offset = 0; offset < ids.length; offset += ATTACHMENT_ID_CHUNK) chunks.push(ids.slice(offset, offset + ATTACHMENT_ID_CHUNK));
+	const results = await Promise.all(chunks.map((chunk) => db
+		.select({
+			id: messageAttachments.id,
+			messageId: messageAttachments.messageId,
+			filename: messageAttachments.filename,
+			type: messageAttachments.contentType,
+			size: messageAttachments.size,
+			disposition: messageAttachments.disposition,
+			contentId: messageAttachments.contentId,
+		})
+		.from(messageAttachments)
+		.where(and(inArray(messageAttachments.messageId, chunk), isNull(messageAttachments.trashedAt)))));
+	return results.flat();
 }

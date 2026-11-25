@@ -22,10 +22,14 @@ import { SidebarAside, MobileMenuButton } from "@/components/sidebar-aside";
 import { SidebarResizeBoundary } from "@/components/sidebar-resize-boundary";
 import { ShortcutsProvider } from "@/components/shortcuts";
 import clsx from "clsx";
+import { usePathname } from "next/navigation";
 import { useDashboardState } from "./dashboard-state";
 import { useAssistantAvailability } from "./use-assistant-availability";
 import { RouteTitle } from "@/components/route-title";
 import { useAppBadge } from "@/hooks/use-app-badge";
+import { UndoToasts } from "@/components/messages/undo-toasts";
+import { Toaster } from "react-hot-toast";
+import { PromotionToast } from "@/components/messages/promotion-toast";
 
 export default function DashboardLayout({
   children,
@@ -33,6 +37,9 @@ export default function DashboardLayout({
   children: React.ReactNode;
 }) {
   const { t } = useLanguage();
+  const pathname = usePathname();
+  // Contacts is a list page like Mailboxes: gray page, white rows, no white panel.
+  const listPage = pathname === "/contacts" || pathname.startsWith("/contacts/");
   const { assistantOpen, setAssistantOpen, assistantFullSize, setAssistantFullSize } = useDashboardState();
   const assistantEnabled = useAssistantAvailability();
   const assistantVisible = assistantEnabled === true && assistantOpen;
@@ -53,7 +60,7 @@ export default function DashboardLayout({
             <MailSearchProvider>
               <ShortcutsProvider>
                 <RouteTitle />
-                <div className="grid h-dvh grid-cols-[minmax(0,1fr)] overflow-hidden bg-[#f6f8fc] transition-[grid-template-columns] md:grid-cols-[var(--sidebar-width)_minmax(0,1fr)]" style={{ transitionDuration: "var(--sidebar-transition-duration)" }}>
+                <div className="safe-area grid h-dvh grid-cols-[minmax(0,1fr)] overflow-hidden bg-[#f6f8fc] transition-[grid-template-columns] md:grid-cols-[var(--sidebar-width)_minmax(0,1fr)]" style={{ transitionDuration: "var(--sidebar-transition-duration)" }}>
                   <SkipToContent />
                   <SidebarAside>
                     <div className="h-full">
@@ -79,7 +86,7 @@ export default function DashboardLayout({
                     <DnsSkippedBanner />
                     <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
                       <AssistantOpenContext.Provider value={assistantVisible}>
-                        <main id="main-content" tabIndex={-1} className="focus:outline-none min-h-0 min-w-0 flex-1 overflow-y-auto rounded-t-3xl bg-white overscroll-contain scrollbar-gutter-stable" aria-hidden={assistantVisible && assistantFullSize} inert={assistantVisible && assistantFullSize}>
+                        <main id="main-content" tabIndex={-1} className={clsx("focus:outline-none page-flush min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain scrollbar-gutter-stable", listPage ? "rounded-tl-3xl max-md:rounded-t-3xl max-md:bg-white max-md:pb-24" : "rounded-t-3xl bg-white")} aria-hidden={assistantVisible && assistantFullSize} inert={assistantVisible && assistantFullSize}>
                           {children}
                         </main>
                       </AssistantOpenContext.Provider>
@@ -89,6 +96,9 @@ export default function DashboardLayout({
                     </div>
                   </div>
                   <FloatingComposer showButton />
+                  <UndoToasts />
+                  <Toaster position="bottom-left" containerClassName="text-sm" />
+                  <PromotionToast />
                 </div>
               </ShortcutsProvider>
             </MailSearchProvider>

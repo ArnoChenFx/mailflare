@@ -13,13 +13,23 @@ export type CalendarEvent = {
   repeatDays: string;
   repeatAnchorDay: number | null;
   repeatUntil: string | null;
+  /** Step between recurrences: every N days/weeks/months/years. */
+  repeatInterval?: number | null;
+  /** Weekday (0-6) and week (1-5, -1 = last) of an nth-weekday monthly repeat. */
+  repeatWeekday?: number | null;
+  repeatWeek?: number | null;
   excludedOccurrences: string;
   reminderMinutes?: number | null;
   timeZone?: string | null;
   seriesStartsAt?: string;
+  /** Set on events created from an emailed invitation: needs-action (pending), tentative or accepted. */
+  responseStatus?: string | null;
+  inviteMessageId?: string | null;
+  /** JSON map of guest address to accepted, tentative or declined. */
+  attendeeResponses?: string | null;
 };
 
-export type CalendarView = "week" | "day";
+export type CalendarView = "month" | "week" | "day";
 
 export type CalendarEventTimes = { startsAt: Date; endsAt: Date };
 

@@ -21,6 +21,7 @@ import type { ReviewSnapshot } from "./send-review-types";
 import { approveAgentAction, requestDraftReview } from "./client-actions";
 import type { AgentConversation, AgentConversationsResponse, AgentErrorResponse, AgentEvent, AgentHistoryResponse, AgentJob, AgentJobsResponse, AgentMessage, AgentPanelProps, AgentPanelView, AgentSettings, AgentSettingsResponse, QueuedAgentMessage } from "./types";
 import { activeAgentTool, activeAgentToolLabel, appendAgentReasoning, consumeAgentStream, editQueuedAgentMessage, enqueueAgentMessage, groupAgentMessages, isAgentScrollAtBottom, markAgentDraftSent, normalizeAgentHistory, readAgentConversationId, removeQueuedAgentMessage, resizeAgentInput, saveAgentConversationId, shouldSubmitAgentInput, steerQueuedAgentMessage, uniqueAgentDraftActions } from "./utils";
+import { Select } from "@/components/ui/select";
 
 export function AgentPanel({ open, fullSize, onClose, onToggleFullSize }: AgentPanelProps) {
 	const { t } = useLanguage();
@@ -71,7 +72,10 @@ export function AgentPanel({ open, fullSize, onClose, onToggleFullSize }: AgentP
 		{ label: t("agent.welcome.actions"), detail: t("agent.welcome.actionsDetail"), prompt: "Find action items in my recent email.", icon: ListChecks },
 	];
 
-	const refresh = useCallback(async () => {
+	const viewRef = useRef(view);
+	useEffect(() => { viewRef.current = view; }, [view]);
+	// Background refreshes must not overwrite unsaved edits while the settings form is open.
+	const refresh = useCallback(async (replaceSettings = false) => {
 		if (!mailboxId) return;
 		const [settingsResponse, conversationsResponse, jobsResponse] = await Promise.all([
 			authFetch(`/api/agent/settings?mailboxId=${encodeURIComponent(mailboxId)}`),
@@ -85,7 +89,7 @@ export function AgentPanel({ open, fullSize, onClose, onToggleFullSize }: AgentP
 		}
 		if (settingsResponse.ok) {
 			const data = await settingsResponse.json() as AgentSettingsResponse;
-			setSettings(data.settings);
+			if (replaceSettings || viewRef.current !== "settings") setSettings(data.settings);
 			setAvailableModels(data.models ?? []);
 			setCanManage(data.canManage);
 			setProviderConfigured(data.providerConfigured);
@@ -114,6 +118,7 @@ export function AgentPanel({ open, fullSize, onClose, onToggleFullSize }: AgentP
 		runningRef.current = false;
 		queueGenerationRef.current += 1;
 		queuedMessagesRef.current = [];
+		// eslint-disable-next-line react-hooks/set-state-in-effect -- clears chat state in step with aborting the running stream and loading the new session
 		setQueuedMessages([]);
 		setBusy(false);
 		if (!open || !mailboxId) return;
@@ -125,7 +130,7 @@ export function AgentPanel({ open, fullSize, onClose, onToggleFullSize }: AgentP
 		setView("chat");
 		if (menuRef.current) menuRef.current.open = false;
 		setError(null);
-		void refresh().catch(() => { if (!cancelled) setError(t("agent.panel.settingsLoadFailed")); });
+		void refresh(true).catch(() => { if (!cancelled) setError(t("agent.panel.settingsLoadFailed")); });
 		const savedId = readAgentConversationId(mailboxId);
 		selectedConversationRef.current = savedId;
 		setLoadingConversation(Boolean(savedId));
@@ -241,6 +246,7 @@ export function AgentPanel({ open, fullSize, onClose, onToggleFullSize }: AgentP
 		const generation = queueGenerationRef.current;
 		const userMessageId = crypto.randomUUID();
 		const assistantMessageId = crypto.randomUUID();
+		// eslint-disable-next-line react-hooks/purity -- send() only runs from event handlers; the compiler flags it through the onClick closures built in render-time .map() calls
 		const startedAt = Date.now();
 		let accepted = false;
 		let streamErrored = false;
@@ -322,7 +328,7 @@ export function AgentPanel({ open, fullSize, onClose, onToggleFullSize }: AgentP
 		try {
 			const response = await authFetch("/api/agent/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(settings) });
 			if (!response.ok) throw new Error(((await response.json()) as AgentErrorResponse).error || t("agent.panel.saveFailed"));
-			await refresh();
+			await refresh(true);
 		} catch (cause) { setError(cause instanceof Error ? cause.message : t("agent.panel.saveFailed")); }
 		finally { setBusy(false); }
 	}
@@ -394,8 +400,8 @@ export function AgentPanel({ open, fullSize, onClose, onToggleFullSize }: AgentP
 		{view === "settings" && <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-4 text-sm">
 			{!canManage && <p>{t("agent.panel.needPermission")}</p>}
 			{settings && <>
-				<label className="block">{t("agent.panel.reviewer")}<select className="mt-2 w-full rounded-xl border border-neutral-200 bg-white p-2 outline-none focus:border-blue-400" value={settings.reviewerUserId ?? ""} disabled={!canManage} onChange={(event) => setSettings({ ...settings, reviewerUserId: event.target.value })}>{reviewers.map((reviewer) => <option key={reviewer.id} value={reviewer.id}>{reviewer.name} ({reviewer.email})</option>)}</select></label>
-				<label className="block">{t("agent.panel.model")}<select className="mt-2 w-full rounded-xl border border-neutral-200 bg-white p-2 outline-none focus:border-blue-400" value={settings.modelId ?? ""} disabled={!canManage || !availableModels.length} onChange={(event) => setSettings({ ...settings, modelId: event.target.value })}>{!availableModels.length && <option value="">{t("agent.panel.noModels")}</option>}{availableModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
+				<label className="block">{t("agent.panel.reviewer")}<Select containerClassName="mt-2 flex w-full rounded-xl bg-white" className="p-2" value={settings.reviewerUserId ?? ""} disabled={!canManage} onChange={(event) => setSettings({ ...settings, reviewerUserId: event.target.value })}>{reviewers.map((reviewer) => <option key={reviewer.id} value={reviewer.id}>{reviewer.name} ({reviewer.email})</option>)}</Select></label>
+				<label className="block">{t("agent.panel.model")}<Select containerClassName="mt-2 flex w-full rounded-xl bg-white" className="p-2" value={settings.modelId ?? ""} disabled={!canManage || !availableModels.length} onChange={(event) => setSettings({ ...settings, modelId: event.target.value })}>{!availableModels.length && <option value="">{t("agent.panel.noModels")}</option>}{availableModels.map((model) => <option key={model} value={model}>{model}</option>)}</Select></label>
 				<div className="flex items-center justify-between gap-3"><span>{t("agent.panel.autoDraft")}</span><Switch checked={settings.autoDraftEnabled} disabled={!canManage || autoReplyEnabled} onCheckedChange={(checked) => setSettings({ ...settings, autoDraftEnabled: checked })} aria-label={t("agent.panel.autoDraft")} /></div>
 				{autoReplyEnabled && <p className="text-amber-700">{t("agent.panel.disableOoo")}</p>}
 				<label className="block">{t("agent.panel.instructions")}<textarea className="mt-2 min-h-32 w-full rounded-xl border border-neutral-200 p-2 outline-none focus:border-blue-400" value={settings.instructions} disabled={!canManage} onChange={(event) => setSettings({ ...settings, instructions: event.target.value })} /></label>

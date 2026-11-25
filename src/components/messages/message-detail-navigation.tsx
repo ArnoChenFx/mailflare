@@ -9,13 +9,24 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { useSelectedMailbox } from "@/components/mailbox-provider";
 import { authFetch } from "@/lib/auth/client";
 import { fetchCachedMessageDetail, getCachedMessageDetail } from "@/lib/messages/detail-cache";
+import { fetchInviteCard, getCachedInviteCard } from "@/lib/calendar/invite-cache";
+import { findInviteAttachment } from "@/lib/calendar/invite-attachment";
 import { FULL_ROUTE_PREFETCH } from "@/lib/navigation/prefetch";
+import type { CachedMessageDetail } from "@/lib/messages/detail-cache-types";
 import type { MessageNavigationResponse } from "@/app/api/messages/navigation/types";
 import type { MessageDetailNavigationContextValue, MessageDetailNavigationProps, MessageDetailNavigationProviderProps, MessageDetailNavigationSnapshot, OpenedUnreadMessages } from "./message-detail-navigation-types";
-import { getMessageDetailNavigationState, takeOpenedUnreadMessage } from "./message-detail-navigation-utils";
+import { getAutoAdvanceId, getMessageDetailNavigationState, takeOpenedUnreadMessage } from "./message-detail-navigation-utils";
+import { useAutoAdvanceEnabled } from "./use-auto-advance";
 import { useConversationView } from "./use-conversation-view";
 
 const NavigationContext = createContext<MessageDetailNavigationContextValue | null>(null);
+
+/** Seed the invite cache once the detail is known, or right away when the attachment state is still unknown. */
+function warmMessageInvite(messageId: string, detail?: CachedMessageDetail) {
+	if (getCachedInviteCard(messageId) !== undefined) return;
+	if (detail?.attachments && !findInviteAttachment(detail.attachments)) return;
+	void fetchInviteCard(messageId).catch(() => {});
+}
 
 export function MessageDetailNavigationProvider({ children, config, currentMessageId }: MessageDetailNavigationProviderProps) {
 	const { selectedMailbox, isLoading: mailboxesLoading } = useSelectedMailbox();
@@ -33,8 +44,18 @@ export function MessageDetailNavigationProvider({ children, config, currentMessa
 		});
 	}, [key]);
 
+	const [dropped, setDropped] = useState<OpenedUnreadMessages>({ key: "", ids: new Set() });
+	const dropEntry = useCallback((messageId: string) => {
+		setDropped((current) => {
+			const ids = new Set(current.key === key ? current.ids : []);
+			ids.add(messageId);
+			return { key, ids };
+		});
+	}, [key]);
+
 	useEffect(() => {
 		const messageId = takeOpenedUnreadMessage();
+		// eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot sessionStorage handoff, a side effect that cannot run during render.
 		if (messageId) recordUnread(messageId);
 	}, [recordUnread]);
 
@@ -71,10 +92,30 @@ export function MessageDetailNavigationProvider({ children, config, currentMessa
 	}, [config.folder, config.folderId, grouped, key, mailboxId, mailboxesLoading, requestAnchor]);
 
 	const unreadIds = openedUnread.key === key ? openedUnread.ids : null;
+	const droppedIds = dropped.key === key ? dropped.ids : null;
 	const entries = snapshot.key === key
-		? snapshot.entries.map((entry) => ({ ...entry, unread: entry.unread || !!unreadIds?.has(entry.id) }))
+		? snapshot.entries
+			.filter((entry) => !droppedIds?.has(entry.id))
+			.map((entry) => ({ ...entry, unread: entry.unread || !!unreadIds?.has(entry.id) }))
 		: [];
-	return <NavigationContext.Provider value={{ entries, hrefPrefix: config.hrefPrefix, recordUnread }}>{children}</NavigationContext.Provider>;
+	return <NavigationContext.Provider value={{ entries, hrefPrefix: config.hrefPrefix, recordUnread, dropEntry }}>{children}</NavigationContext.Provider>;
+}
+
+/**
+ * Call after `messageId` was moved out of the open list. With auto-advance on it
+ * returns the next message's href (and hides the moved one from the arrows);
+ * otherwise null, so the caller falls back to the list.
+ */
+export function useAutoAdvance(messageId: string): () => string | null {
+	const context = useContext(NavigationContext);
+	const [enabled] = useAutoAdvanceEnabled();
+	return useCallback(() => {
+		if (!enabled || !context) return null;
+		const targetId = getAutoAdvanceId(context.entries, messageId);
+		if (!targetId) return null;
+		context.dropEntry(messageId);
+		return `${context.hrefPrefix}/${targetId}`;
+	}, [context, enabled, messageId]);
 }
 
 export function MessageDetailNavigation({ messageId, unread }: MessageDetailNavigationProps) {
@@ -97,8 +138,15 @@ export function MessageDetailNavigation({ messageId, unread }: MessageDetailNavi
 	useEffect(() => {
 		if (!previousId && !nextId) return;
 		const warm = (id: string | null) => {
-			if (!id || getCachedMessageDetail(id)?.body) return;
-			void fetchCachedMessageDetail(id, true).catch(() => {});
+			if (!id) return;
+			const cached = getCachedMessageDetail(id);
+			if (cached?.body) {
+				warmMessageInvite(id, cached);
+				return;
+			}
+			void fetchCachedMessageDetail(id, true)
+				.then((detail) => warmMessageInvite(id, detail))
+				.catch(() => {});
 		};
 		const run = () => {
 			warm(previousId);
@@ -115,10 +163,18 @@ export function MessageDetailNavigation({ messageId, unread }: MessageDetailNavi
 	if (!context) return null;
 	const hrefPrefix = context.hrefPrefix;
 
-	function prefetchMessage(id: string | null) {
+	function prefetchMessage(id: string | null, immediateInvite = false) {
 		if (!id) return;
 		router.prefetch(`${hrefPrefix}/${id}`, FULL_ROUTE_PREFETCH);
-		if (!getCachedMessageDetail(id)?.body) void fetchCachedMessageDetail(id, true).catch(() => {});
+		const cached = getCachedMessageDetail(id);
+		if (immediateInvite) warmMessageInvite(id, cached);
+		if (cached?.body) {
+			warmMessageInvite(id, cached);
+			return;
+		}
+		void fetchCachedMessageDetail(id, true)
+			.then((detail) => warmMessageInvite(id, detail))
+			.catch(() => {});
 	}
 
 	return (
@@ -137,9 +193,9 @@ export function MessageDetailNavigation({ messageId, unread }: MessageDetailNavi
 					disabled={!previousId}
 					onPointerEnter={() => prefetchMessage(previousId)}
 					onFocus={() => prefetchMessage(previousId)}
-					onTouchStart={() => prefetchMessage(previousId)}
+					onTouchStart={() => prefetchMessage(previousId, true)}
 					onClick={() => {
-						prefetchMessage(previousId);
+						prefetchMessage(previousId, true);
 						if (previousId) router.push(`${hrefPrefix}/${previousId}`);
 					}}
 				>
@@ -155,9 +211,9 @@ export function MessageDetailNavigation({ messageId, unread }: MessageDetailNavi
 					disabled={!nextId}
 					onPointerEnter={() => prefetchMessage(nextId)}
 					onFocus={() => prefetchMessage(nextId)}
-					onTouchStart={() => prefetchMessage(nextId)}
+					onTouchStart={() => prefetchMessage(nextId, true)}
 					onClick={() => {
-						prefetchMessage(nextId);
+						prefetchMessage(nextId, true);
 						if (nextId) router.push(`${hrefPrefix}/${nextId}`);
 					}}
 				>

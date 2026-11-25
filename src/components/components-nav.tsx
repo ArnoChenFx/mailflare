@@ -72,7 +72,7 @@ export function NavItem({ link, iconClassName, labelClassName, wrap }: Props) {
     const composeButton = (
       <button
         type="button"
-        onClick={openComposer}
+        onClick={() => openComposer()}
         className={cn(!minimal && "ml-3", classes)}
         aria-label={minimal ? link.label : undefined}
         {...dropProps}
@@ -114,7 +114,8 @@ export function NavItem({ link, iconClassName, labelClassName, wrap }: Props) {
       href={link.href}
       onPointerEnter={prefetch}
       onFocus={prefetch}
-      aria-label={minimal ? link.label : undefined}
+      aria-current={active ? "page" : undefined}
+      aria-label={minimal ? (typeof link.count === "number" && link.count > 0 ? `${link.label}, ${link.count}` : link.label) : undefined}
       className={cn(!minimal && "pl-6", classes)}
       {...dropProps}
     >

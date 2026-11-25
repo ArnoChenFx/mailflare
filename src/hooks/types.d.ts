@@ -1,6 +1,6 @@
 export type MessageStatus = "received" | "sent" | "draft" | "queued" | "failed" | "archived" | "trash" | "spam";
 
-export type MessageFolder = "inbox" | "starred" | "snoozed" | "sent" | "scheduled" | "drafts" | "archived" | "trash" | "spam";
+export type MessageFolder = "inbox" | "promotions" | "starred" | "snoozed" | "sent" | "scheduled" | "drafts" | "archived" | "trash" | "spam";
 
 export type MessageDirection = "inbound" | "outbound";
 
@@ -21,6 +21,7 @@ export type Message = {
 	/** Resolved sender label: a manually named contact, otherwise this message's From name. */
 	fromContactName?: string | null;
 	fromContactHasAvatar?: boolean;
+	/** Resolved recipient label: a manually named contact, otherwise this message's To name. */
 	toContactName?: string | null;
 	subject: string | null;
 	snippet: string | null;
@@ -31,10 +32,17 @@ export type Message = {
 	starred: boolean;
 	snoozedUntil?: string | null;
 	hasUnsubscribe?: boolean;
+	/** `promotions` for filed bulk mail, `primary` after a manual move to Inbox, null when unclassified. */
+	category?: string | null;
+	/** Normalised sender address, null on rows from before promotions. */
+	senderAddress?: string | null;
 	/** When a scheduled send will go out; set on rows in the Scheduled list. */
 	scheduledAt?: string | null;
 	/** Opens counted by the read-receipt pixel; absent when the message was sent without one. */
 	openCount?: number;
+	/** Notes on the conversation, with the text of the latest ones; absent when it has none. */
+	noteCount?: number;
+	notePreview?: string;
 	threadId: string | null;
 	inReplyTo?: string | null;
 	references?: string | null;
@@ -107,8 +115,11 @@ export type MessageCounts = {
 	folders: Record<MessageFolder, FolderCount>;
 	customFolders: Record<string, FolderCount>;
 	mailboxes: MailboxCount[];
+	/** Mailboxes in scope with Promotions on (`show` or `separate`); off mailboxes are absent. Missing from older responses. */
+	promotionModes?: Record<string, "show" | "separate">;
 };
 
 export type MessageCountsDelta = {
 	inboxUnreadDelta?: number;
+	promotionsUnreadDelta?: number;
 };

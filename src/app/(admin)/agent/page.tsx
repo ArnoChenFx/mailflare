@@ -16,6 +16,7 @@ import { parseAgentModelIds, toggleAgentModelId } from "@/lib/agent/model-ids";
 import type { AgentModelOption, AgentProviderPreset } from "@/lib/agent/provider-types";
 import type { AgentAdminForm } from "./types";
 import { baseUrlForPreset, loadAgentAdminSettings, loadAgentModels, PROVIDER_PRESETS, saveAgentAdminSettings, saveAgentEnabled, updateAgentModelRate } from "./utils";
+import { Select } from "@/components/ui/select";
 
 const initialForm: AgentAdminForm = { provider: "cloudflare", preset: "openai", baseUrl: "", apiKey: "", model: DEFAULT_CLOUDFLARE_MODEL, rates: {} };
 
@@ -29,10 +30,8 @@ export default function AdminAgentPage() {
 	const [cloudflareAvailable, setCloudflareAvailable] = useState(false);
 	const [hasSavedKey, setHasSavedKey] = useState(false);
 	const [savedEndpoint, setSavedEndpoint] = useState("");
-	const [models, setModels] = useState<AgentModelOption[]>([]);
-	const [modelSource, setModelSource] = useState<"catalog" | "suggested" | null>(null);
+	const [modelResult, setModelResult] = useState<{ key: string; models: AgentModelOption[]; source: "catalog" | "suggested" | null; error: string | null } | null>(null);
 	const [modelsLoading, setModelsLoading] = useState(false);
-	const [modelError, setModelError] = useState<string | null>(null);
 	const [status, setStatus] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
 
@@ -52,29 +51,31 @@ export default function AdminAgentPage() {
 
 	const canUseSavedKey = hasSavedKey && savedEndpoint === `${form.preset}|${form.baseUrl}`;
 	const selectedModelIds = parseAgentModelIds(form.model);
+	const missingEndpoint = form.provider === "compatible" && (!form.baseUrl || (!form.apiKey.trim() && !canUseSavedKey));
+	// Results belong to the endpoint they were loaded for; changing it hides them until the next load.
+	const modelsKey = `${form.provider}|${form.preset}|${form.baseUrl}|${form.apiKey}|${canUseSavedKey}`;
+	const currentModels = loaded && !missingEndpoint && modelResult?.key === modelsKey ? modelResult : null;
+	const models = currentModels?.models ?? [];
+	const modelSource = currentModels?.source ?? null;
+	const modelError = loaded && missingEndpoint
+		? form.preset === "custom" && !form.baseUrl ? t("agentAdmin.enterUrl") : t("agentAdmin.enterKey")
+		: currentModels?.error ?? null;
 	useEffect(() => {
-		if (!loaded) return;
-		setModels([]);
-		setModelSource(null);
-		setModelError(null);
-		if (form.provider === "compatible" && (!form.baseUrl || (!form.apiKey.trim() && !canUseSavedKey))) {
-			setModelError(form.preset === "custom" && !form.baseUrl ? t("agentAdmin.enterUrl") : t("agentAdmin.enterKey"));
-			return;
-		}
+		if (!loaded || missingEndpoint) return;
 		const controller = new AbortController();
 		const timer = window.setTimeout(() => {
+			setModelResult(null);
 			setModelsLoading(true);
 			void loadAgentModels(form, controller.signal).then((data) => {
-				setModels(data.models);
-				setModelSource(data.source);
+				setModelResult({ key: modelsKey, models: data.models, source: data.source, error: null });
 				const published = Object.fromEntries(data.models.flatMap((item) => item.rates ? [[item.id, item.rates]] : []));
 				if (Object.keys(published).length) setForm((current) => ({ ...current, rates: { ...current.rates, ...published } }));
 			}).catch((error) => {
-				if (!controller.signal.aborted) setModelError(error instanceof Error ? error.message : t("agentAdmin.modelsFailed"));
+				if (!controller.signal.aborted) setModelResult({ key: modelsKey, models: [], source: null, error: error instanceof Error ? error.message : t("agentAdmin.modelsFailed") });
 			}).finally(() => { if (!controller.signal.aborted) setModelsLoading(false); });
 		}, form.provider === "cloudflare" ? 0 : 500);
 		return () => { window.clearTimeout(timer); controller.abort(); };
-	}, [loaded, form.provider, form.preset, form.baseUrl, form.apiKey, canUseSavedKey, t]);
+	}, [loaded, missingEndpoint, modelsKey, form.provider, form.preset, form.baseUrl, form.apiKey, canUseSavedKey, t]);
 
 	async function submit(event: React.FormEvent<HTMLFormElement>) {
 		event.preventDefault();
@@ -107,9 +108,9 @@ export default function AdminAgentPage() {
 		<Card className="rounded-3xl border-0 bg-white p-6">
 			<CardHeader className="py-0"><CardTitle className="flex items-center gap-2"><Bot className="h-5 w-5" />{t("agentAdmin.provider")}</CardTitle><CardDescription>{t("agentAdmin.providerWarning")}</CardDescription></CardHeader>
 			<CardContent className="pt-6"><form onSubmit={submit} className="space-y-5">
-				<div className="space-y-2"><Label htmlFor="agent-provider">{t("agentAdmin.providerLabel")}</Label><select id="agent-provider" className="flex h-10 w-full rounded-md border border-neutral-200 bg-transparent px-3 text-sm shadow-sm shadow-neutral-200/50 focus-visible:border-blue-600 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50" value={form.provider} disabled={!loaded} onChange={(event) => setForm((current) => ({ ...current, provider: event.target.value as AgentAdminForm["provider"], baseUrl: event.target.value === "compatible" ? baseUrlForPreset(current.preset, current.baseUrl) : "", model: event.target.value === "cloudflare" ? DEFAULT_CLOUDFLARE_MODEL : "" }))}><option value="cloudflare">{t("agentAdmin.cloudflareAi")}</option><option value="compatible">{t("agentAdmin.openaiCompatible")}</option></select>{form.provider === "cloudflare" && !cloudflareAvailable && <p className="text-xs text-amber-700">{t("agentAdmin.needsBinding")}</p>}</div>
+				<div className="space-y-2"><Label htmlFor="agent-provider">{t("agentAdmin.providerLabel")}</Label><Select id="agent-provider" containerClassName="h-10 w-full rounded-md px-0 shadow-sm shadow-neutral-200/50" className="px-3 text-sm" value={form.provider} disabled={!loaded} onChange={(event) => setForm((current) => ({ ...current, provider: event.target.value as AgentAdminForm["provider"], baseUrl: event.target.value === "compatible" ? baseUrlForPreset(current.preset, current.baseUrl) : "", model: event.target.value === "cloudflare" ? DEFAULT_CLOUDFLARE_MODEL : "" }))}><option value="cloudflare">{t("agentAdmin.cloudflareAi")}</option><option value="compatible">{t("agentAdmin.openaiCompatible")}</option></Select>{form.provider === "cloudflare" && !cloudflareAvailable && <p className="text-xs text-amber-700">{t("agentAdmin.needsBinding")}</p>}</div>
 				{form.provider === "compatible" && <>
-					<div className="space-y-2"><Label htmlFor="agent-preset">{t("agentAdmin.template")}</Label><select id="agent-preset" className="flex h-10 w-full rounded-md border border-neutral-200 bg-transparent px-3 text-sm shadow-sm shadow-neutral-200/50 focus-visible:border-blue-600 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50" value={form.preset} onChange={(event) => { const preset = event.target.value as AgentProviderPreset; setForm((current) => ({ ...current, preset, baseUrl: baseUrlForPreset(preset), apiKey: "", model: "" })); }}>{PROVIDER_PRESETS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></div>
+					<div className="space-y-2"><Label htmlFor="agent-preset">{t("agentAdmin.template")}</Label><Select id="agent-preset" containerClassName="h-10 w-full rounded-md px-0 shadow-sm shadow-neutral-200/50" className="px-3 text-sm" value={form.preset} onChange={(event) => { const preset = event.target.value as AgentProviderPreset; setForm((current) => ({ ...current, preset, baseUrl: baseUrlForPreset(preset), apiKey: "", model: "" })); }}>{PROVIDER_PRESETS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</Select></div>
 					<div className="space-y-2"><Label htmlFor="agent-url">{t("agentAdmin.baseUrl")}</Label><Input id="agent-url" type="url" value={form.baseUrl} readOnly={form.preset !== "custom"} placeholder="https://provider.example/v1" onChange={(event) => setForm((current) => ({ ...current, baseUrl: event.target.value, model: "" }))} required /></div>
 					<div className="space-y-2"><Label htmlFor="agent-key">{t("agentAdmin.apiKey")}</Label><Input id="agent-key" type="password" value={form.apiKey} autoComplete="new-password" placeholder={canUseSavedKey ? t("agentAdmin.savedKeyPlaceholder") : t("agentAdmin.enterKeyPlaceholder")} onChange={(event) => setForm((current) => ({ ...current, apiKey: event.target.value }))} /><p className="text-xs text-neutral-500">{canUseSavedKey ? t("agentAdmin.keySaved") : t("agentAdmin.keyNote")}</p></div>
 				</>}

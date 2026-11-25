@@ -1,9 +1,13 @@
 export interface NewMessageNotification {
+	/** The message's full From header, e.g. `"Name" <address>`. */
 	from: string;
+	/** Resolved sender label: a manually named contact, otherwise this message's From name. */
 	fromName: string | null;
 	mailboxId: string;
 	messageId: string;
 	subject: string | null;
+	/** Set for bulk mail; omitted otherwise. */
+	category?: "promotions";
 	type: "new_message";
 }
 

@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { agentDraftMetadata, messages } from "@/db/schema";
 import { sendEmail } from "@/lib/email/send";
+import { SuppressedRecipientError, suppressedSubmissionError } from "@/lib/deliverability/suppression-utils";
 import { loadMessageAttachmentContents } from "@/lib/email/attachments";
 import { deleteMessageWithObjects } from "@/lib/email/message-cleanup";
 import { decodeIdentityId, identityId } from "./ids";
@@ -123,6 +124,10 @@ export const emailSubmissionSet: JmapMethodHandler = async (ctx, args) => {
 				mdnBlobIds: [],
 			};
 		} catch (error) {
+			if (error instanceof SuppressedRecipientError) {
+				notCreated[creationId] = suppressedSubmissionError(error, [draft.toAddr, draft.ccAddr, draft.bccAddr]);
+				continue;
+			}
 			notCreated[creationId] = { type: "forbidden", description: error instanceof Error ? error.message : "Send failed" };
 		}
 	}
@@ -146,7 +151,7 @@ export const emailSubmissionGet: JmapMethodHandler = async (ctx, args) => ({
 	accountId: ctx.accountId,
 	state: await getEmailState(ctx),
 	list: [],
-	notFound: ((args.ids ?? []) as string[]) ?? [],
+	notFound: (args.ids ?? []) as string[],
 });
 export const emailSubmissionQuery: JmapMethodHandler = async (ctx) => ({ accountId: ctx.accountId, queryState: await getEmailState(ctx), canCalculateChanges: false, position: 0, ids: [], total: 0 });
 export const emailSubmissionChanges: JmapMethodHandler = async () => ({ type: "cannotCalculateChanges" });

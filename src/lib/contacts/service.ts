@@ -1,9 +1,12 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db";
-import { contacts, routingRules } from "@/db/schema";
+import { selectInBatches } from "@/lib/db-params";
+import { contacts, domains, routingRules } from "@/db/schema";
 import { getFirstEmailAddressEntry, normalizeEmailAddress } from "@/lib/email/address";
-import type { BlockContactInput, ContactDisplayName, ContactInput, MessageContactNames } from "@/lib/contacts/types";
-import { getContactId, getContactNameFromAddress, getSenderDisplayName } from "@/lib/contacts/utils";
+import type { BlockContactInput, ContactCard, ContactDisplayName, ContactInput, MessageContactNames } from "@/lib/contacts/types";
+import type { ContactSource } from "@/lib/email/address-types";
+import { isMultiPartSuffix, isSharedMailDomain, registrableDomain } from "@/lib/spam/domain-utils";
+import { getContactId, getContactNameFromAddress, getPartyDisplayName } from "@/lib/contacts/utils";
 import { importGravatarAvatar } from "@/lib/contacts/gravatar";
 
 export async function upsertContactFromAddress(env: CloudflareEnv, input: ContactInput) {
@@ -21,7 +24,7 @@ export async function upsertContactFromAddress(env: CloudflareEnv, input: Contac
 
 	if (existing) {
 		const nextDisplayName = getNextDisplayName(existing.displayName, existing.source, displayName, input.source);
-		const nextSource = existing.source === "manual" || (existing.source === "outbound" && input.source === "inbound")
+		const nextSource = existing.source === "manual" || existing.source === "import" || (existing.source === "outbound" && input.source === "inbound")
 			? existing.source
 			: input.source;
 
@@ -54,15 +57,86 @@ export async function upsertContactFromAddress(env: CloudflareEnv, input: Contac
 	return created ?? null;
 }
 
+const MAX_AVATAR_LOOKUPS = 20;
+
+export async function upsertContactsFromAddresses(
+	env: CloudflareEnv,
+	userId: string,
+	addresses: string[],
+	source: ContactSource = "outbound",
+): Promise<void> {
+	const entries = new Map<string, { email: string; displayName: string | null }>();
+	for (const address of addresses) {
+		const email = normalizeEmailAddress(address);
+		if (!email) continue;
+		entries.set(email, { email, displayName: getContactNameFromAddress(address) });
+	}
+	if (entries.size === 0) return;
+
+	const db = getDb(env);
+	const emails = [...entries.keys()];
+	const existingRows = await db
+		.select()
+		.from(contacts)
+		.where(and(eq(contacts.userId, userId), inArray(contacts.email, emails)));
+	const existing = new Map(existingRows.map((contact) => [contact.email, contact]));
+	const now = new Date();
+	const insertRows: Array<typeof contacts.$inferInsert> = [];
+	const updateQueries: Array<PromiseLike<unknown>> = [];
+
+	for (const entry of entries.values()) {
+		const current = existing.get(entry.email);
+		if (!current) {
+			insertRows.push({
+				id: getContactId(userId, entry.email),
+				userId,
+				email: entry.email,
+				displayName: entry.displayName,
+				source,
+				lastSeenAt: now,
+			});
+			continue;
+		}
+		const nextDisplayName = getNextDisplayName(current.displayName, current.source, entry.displayName, source);
+		const nextSource = current.source === "manual" || current.source === "import" || (current.source === "outbound" && source === "inbound")
+			? current.source
+			: source;
+		updateQueries.push(db.update(contacts).set({
+			displayName: nextDisplayName,
+			source: nextSource,
+			lastSeenAt: now,
+		}).where(eq(contacts.id, current.id)));
+	}
+
+	for (let index = 0; index < insertRows.length; index += 10) {
+		await db.insert(contacts).values(insertRows.slice(index, index + 10)).onConflictDoNothing();
+	}
+	for (let index = 0; index < updateQueries.length; index += 10) {
+		await Promise.all(updateQueries.slice(index, index + 10));
+	}
+
+	const newEmails = insertRows.slice(0, MAX_AVATAR_LOOKUPS).map((row) => row.email);
+	for (let index = 0; index < newEmails.length; index += 4) {
+		const batch = newEmails.slice(index, index + 4);
+		const avatars = await Promise.all(batch.map(async (email) => ({
+			email,
+			avatarKey: await importGravatarAvatar(env, userId, email),
+		})));
+		await Promise.all(avatars.flatMap(({ email, avatarKey }) => avatarKey
+			? [db.update(contacts).set({ avatarKey }).where(eq(contacts.id, getContactId(userId, email)))]
+			: []));
+	}
+}
+
 export async function getContactDisplayNameMap(env: CloudflareEnv, userId: string, addresses: string[]) {
 	const emails = Array.from(new Set(addresses.map(normalizeEmailAddress).filter(Boolean)));
 	if (emails.length === 0) return new Map<string, ContactDisplayName>();
 
 	const db = getDb(env);
-	const rows = await db
+	const rows = await selectInBatches(emails, (batch) => db
 		.select()
 		.from(contacts)
-		.where(and(eq(contacts.userId, userId), inArray(contacts.email, emails)));
+		.where(and(eq(contacts.userId, userId), inArray(contacts.email, batch))));
 
 	const entries = rows
 		.filter((contact) => !!contact.displayName)
@@ -86,6 +160,28 @@ export async function getContactAvatarMap(env: CloudflareEnv, userId: string, ad
 	return new Map(rows.map((contact) => [contact.email, !!contact.avatarKey]));
 }
 
+const CONTACT_EMAIL_CHUNK = 90;
+
+export async function getContactCardMap(env: CloudflareEnv, userId: string, addresses: string[]) {
+	const emails = Array.from(new Set(addresses.map(normalizeEmailAddress).filter(Boolean)));
+	if (emails.length === 0) return new Map<string, ContactCard>();
+
+	const db = getDb(env);
+	// userId takes one bound parameter, so keep each email chunk under D1's limit of 100.
+	const chunks: string[][] = [];
+	for (let offset = 0; offset < emails.length; offset += CONTACT_EMAIL_CHUNK) chunks.push(emails.slice(offset, offset + CONTACT_EMAIL_CHUNK));
+	const rows = (await Promise.all(chunks.map((chunk) => db
+		.select({ email: contacts.email, displayName: contacts.displayName, source: contacts.source, avatarKey: contacts.avatarKey })
+		.from(contacts)
+		.where(and(eq(contacts.userId, userId), inArray(contacts.email, chunk)))))).flat();
+
+	return new Map(rows.map((contact) => [contact.email, {
+		displayName: contact.displayName,
+		source: contact.source,
+		hasAvatar: !!contact.avatarKey,
+	}]));
+}
+
 export async function getMessageContactNames(
 	env: CloudflareEnv,
 	userId: string,
@@ -97,8 +193,8 @@ export async function getMessageContactNames(
 	const contactMap = await getContactDisplayNameMap(env, userId, [fromAddr, firstTo]);
 
 	return {
-		fromContactName: getSenderDisplayName(fromAddr, contactMap.get(normalizeEmailAddress(fromAddr))),
-		toContactName: contactMap.get(normalizeEmailAddress(firstTo))?.displayName ?? null,
+		fromContactName: getPartyDisplayName(fromAddr, contactMap.get(normalizeEmailAddress(fromAddr))),
+		toContactName: getPartyDisplayName(firstTo, contactMap.get(normalizeEmailAddress(firstTo))),
 	};
 }
 
@@ -131,6 +227,7 @@ export async function blockContact(env: CloudflareEnv, input: BlockContactInput)
 		}
 	}
 
+	const blockRuleId = `block:${input.mailboxId}:${email}`;
 	const [existingRule] = await db
 		.select()
 		.from(routingRules)
@@ -145,25 +242,102 @@ export async function blockContact(env: CloudflareEnv, input: BlockContactInput)
 		)
 		.limit(1);
 	if (!existingRule) {
-		await db.insert(routingRules).values({
-			id: `block:${input.mailboxId}:${email}`,
-			userId: input.userId,
-			domainId: input.domainId,
-			pattern: email,
-			matchField: "email",
-			matchOperator: "exact",
+		const match = {
+			matchField: "email" as const,
+			matchOperator: "exact" as const,
 			matchValue: email,
-			mailboxId: input.mailboxId,
-			action: "trash",
-			priority: 100,
-		});
+			action: "trash" as const,
+		};
+		// The generated rule may have been edited or disabled since; restore what makes it block, and leave who owns it alone.
+		await db
+			.insert(routingRules)
+			.values({ id: blockRuleId, userId: input.userId, domainId: input.domainId, pattern: email, mailboxId: input.mailboxId, priority: 100, ...match })
+			.onConflictDoUpdate({ target: routingRules.id, set: { ...match, enabled: true } });
 	}
 
 	return { email, blocked: true };
 }
 
+export type BlockDomainErrorCode = "INVALID_DOMAIN" | "OWN_DOMAIN" | "SHARED_PROVIDER";
+
+/** A refused domain block; `code` is what the API returns and the UI translates. */
+export class BlockDomainError extends Error {
+	constructor(readonly code: BlockDomainErrorCode) {
+		super(code);
+	}
+}
+
+/** The ASCII (punycode) form of a host name, or null when it is not a plain dotted name. */
+function toAsciiHost(host: string): string | null {
+	if (!host || /[\s/?#@:\\%]/.test(host)) return null;
+	try {
+		const ascii = new URL(`http://${host}`).hostname;
+		return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(ascii) ? ascii : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Trashes everything from a sender's registrable domain and its subdomains with a mailbox routing rule, the
+ * same kind of rule `blockContact` adds for one address. Refused for domains hosted on this installation (or
+ * containing one) and for shared mailbox providers, where one address says nothing about the rest.
+ */
+export async function blockSenderDomain(env: CloudflareEnv, input: BlockContactInput) {
+	const address = normalizeEmailAddress(input.address);
+	const sender = address.includes("@") ? address.slice(address.lastIndexOf("@") + 1) : "";
+	const host = toAsciiHost(sender);
+	if (!host) throw new BlockDomainError("INVALID_DOMAIN");
+	const domain = registrableDomain(host);
+	if (isMultiPartSuffix(domain)) throw new BlockDomainError("INVALID_DOMAIN");
+	if (isSharedMailDomain(domain)) throw new BlockDomainError("SHARED_PROVIDER");
+
+	const db = getDb(env);
+	const hosted = await db.select({ hostname: domains.hostname }).from(domains);
+	if (hosted.some(({ hostname }) => {
+		const name = hostname.toLowerCase();
+		return name === domain || name.endsWith(`.${domain}`);
+	})) {
+		throw new BlockDomainError("OWN_DOMAIN");
+	}
+
+	// Mail can arrive with the unicode spelling, so the rule matches that as well as the punycode form.
+	const spellings = new Set([domain]);
+	const rawHost = sender.replace(/\.$/, "");
+	if (rawHost !== host && registrableDomain(rawHost)) spellings.add(registrableDomain(rawHost));
+	const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const matchValue = `@(?:[^@\\s.]+\\.)*(?:${[...spellings].map(escape).join("|")})$`;
+	const [existingRule] = await db
+		.select({ id: routingRules.id })
+		.from(routingRules)
+		.where(and(
+			eq(routingRules.mailboxId, input.mailboxId),
+			eq(routingRules.matchField, "sender"),
+			eq(routingRules.matchOperator, "regex"),
+			eq(routingRules.matchValue, matchValue),
+			eq(routingRules.action, "trash"),
+		))
+		.limit(1);
+	if (!existingRule) {
+		await db.insert(routingRules).values({
+			id: `block-domain:${input.mailboxId}:${domain}`,
+			userId: input.userId,
+			domainId: input.domainId,
+			name: `Block ${domain}`,
+			pattern: matchValue,
+			matchField: "sender",
+			matchOperator: "regex",
+			matchValue,
+			mailboxId: input.mailboxId,
+			action: "trash",
+			priority: 100,
+		}).onConflictDoNothing();
+	}
+	return { domain, blocked: true };
+}
+
 function getNextDisplayName(existingName: string | null, source: string, nextName: string | null, incomingSource: string): string | null {
-	if (source === "manual") return existingName;
+	if (source === "manual" || source === "import") return existingName;
 	// A sender chooses its own From name, so inbound mail may name a contact but never rename one.
 	if (incomingSource === "inbound" && existingName) return existingName;
 	if (nextName) return nextName;

@@ -14,8 +14,9 @@ const mocks = {
 	"@/db": "const q={from(){return q;},where(){return q;},limit(){return Promise.resolve(globalThis.__settingsRows??[]);}};export function getDb(){return {select(){return q;},insert(){return {values(){return {onConflictDoUpdate(){return Promise.resolve();}}}}}}}",
 	"@/lib/cloudflare-dns": "export async function createDnsRecord(){}export async function deleteDnsRecord(){}export async function listDnsRecords(){return [];}export async function listMxRecords(){return [];}",
 	"@/lib/domains/provision": "export const isManualZone=(z)=>z==='manual';export const shouldBindEmailCatchAllToWorker=()=>false;",
-	"@/lib/email/outbound-provider": "export async function getResendKeyStatus(){return globalThis.__resendKey??{configured:false,apiKey:null};}export async function getResendApiKey(){return 're_test';}",
+	"@/lib/email/outbound-provider": "export async function getResendKeyStatus(){return globalThis.__resendKey??{configured:false,apiKey:null};}export async function getResendClient(){return {apiKey:'re_test',baseUrl:'https://api.resend.com'};}",
 	"@/lib/email/resend-api": `export class ResendRestrictedKeyError extends Error{}
+		export function resendClient(_env, apiKey){return {apiKey,baseUrl:"https://api.resend.com"};}
 		export async function findResendDomain(){return globalThis.__resendDomain??null;}
 		export async function getResendDomain(){return globalThis.__resendDomain??null;}
 		export async function listResendWebhooks(){return globalThis.__webhooks??[];}
@@ -58,14 +59,18 @@ rmSync(bundleDirectory, { recursive: true, force: true });
 
 const manualDomain = { hostname: "example.com", zoneId: "manual" };
 
+const RR_TYPES = { A: 1, CNAME: 5, MX: 15, TXT: 16, AAAA: 28 };
+
 function answerDns(answers) {
 	const asked = [];
 	globalThis.fetch = async (url) => {
 		const parsed = new URL(url);
 		const name = parsed.searchParams.get("name");
 		asked.push(name);
-		const data = answers[`${name}|${parsed.searchParams.get("type")}`];
-		return Response.json(data === undefined ? { Status: 3 } : { Status: 0, Answer: data.map((value) => ({ name, type: 0, TTL: 60, data: value })) });
+		const type = parsed.searchParams.get("type");
+		const data = answers[`${name}|${type}`];
+		// Real DoH answers carry the numeric RR type; queryDns keeps only the type it asked for.
+		return Response.json(data === undefined ? { Status: 3 } : { Status: 0, Answer: data.map((value) => ({ name, type: RR_TYPES[type], TTL: 60, data: value })) });
 	};
 	return asked;
 }

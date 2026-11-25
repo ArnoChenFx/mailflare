@@ -4,16 +4,17 @@ import { requireUser } from "@/lib/auth/cookies";
 import { canManageDomains } from "@/lib/auth/admin";
 import { addDomainSchema } from "@/lib/validators";
 import { addDomainForUser, listUserDomains } from "@/lib/domains/service";
+import { domainListOwnerIds } from "@/lib/domains/utils";
 import type { DnsStatusSummary } from "@/lib/dns-status";
 import { summariseDomainDns } from "@/lib/domains/dns-view";
 import { getDomainProvisioningError } from "@/lib/domains/errors";
+import { mtaStsBlockedResponse } from "@/lib/deliverability/mta-sts-block-response";
 import { hasValidSessionMutationOrigin } from "@/lib/auth/origin";
 
 export async function GET(request: NextRequest) {
 	const env = getEnv();
 	const user = await requireUser(env, request);
-	const domainOwnerId = user.canManageMailboxes && user.createdByUserId ? user.createdByUserId : user.id;
-	const domains = await listUserDomains(env, domainOwnerId);
+	const domains = await listUserDomains(env, domainListOwnerIds(user));
 
 	const includeDns = request.nextUrl.searchParams.get("includeDns") === "true";
 
@@ -63,6 +64,8 @@ export async function POST(request: Request) {
 		});
 		return NextResponse.json(result);
 	} catch (err) {
+		const blocked = await mtaStsBlockedResponse(err);
+		if (blocked) return blocked;
 		const failure = getDomainProvisioningError(err, "Failed to add domain");
 		return NextResponse.json(
 			{ error: failure.message, code: failure.code },

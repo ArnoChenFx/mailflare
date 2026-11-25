@@ -1,24 +1,25 @@
 "use client";
 
 import { useState } from "react";
-import { MailCheck } from "@/components/icons";
+import { BellOff, MailCheck } from "@/components/icons";
 import { useCompose } from "@/components/compose/compose-context";
 import { useLanguage } from "@/components/language-provider";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Tooltip } from "@/components/ui/tooltip";
 import { openUnsubscribeUrl } from "@/components/message-actions/utils";
-import { requestUnsubscribe } from "./unsubscribe-button-utils";
+import { isMessageUnsubscribed, markMessageUnsubscribed, requestUnsubscribe } from "./unsubscribe-button-utils";
 
 /**
  * The header-level unsubscribe action. The route decides the real mechanism —
  * one-click POST, sent mailto, or a link to open — this only reflects the
  * outcome and keeps an "Unsubscribed" state instead of offering it twice.
  */
-export function MessageUnsubscribeButton({ messageId, variant = "header" }: { messageId: string; variant?: "header" | "row" }) {
+export function MessageUnsubscribeButton({ messageId, variant = "header", iconOnly = false }: { messageId: string; variant?: "header" | "row"; iconOnly?: boolean }) {
 	const { t } = useLanguage();
 	const { showNotice } = useCompose();
 	const [pending, setPending] = useState(false);
-	const [done, setDone] = useState(false);
+	const [done, setDone] = useState(() => isMessageUnsubscribed(messageId));
 	const [confirmOpen, setConfirmOpen] = useState(false);
 
 	// The confirm dialog closes at once; progress and the outcome are toasts.
@@ -28,6 +29,7 @@ export function MessageUnsubscribeButton({ messageId, variant = "header" }: { me
 		showNotice(t("actions.unsubscribing"), { tone: "loading" });
 		try {
 			const result = await requestUnsubscribe(messageId);
+			markMessageUnsubscribed(messageId);
 			setDone(true);
 			if (result.method === "link") {
 				openUnsubscribeUrl(result.url);
@@ -46,6 +48,19 @@ export function MessageUnsubscribeButton({ messageId, variant = "header" }: { me
 
 	const row = variant === "row";
 	if (done) {
+		if (iconOnly) {
+			return (
+				<Tooltip label={t("actions.unsubscribed")}>
+					<span
+						role="status"
+						aria-label={t("actions.unsubscribed")}
+						className="flex h-7 w-7 items-center justify-center text-green-700"
+					>
+						<MailCheck className="h-4 w-4" aria-hidden="true" />
+					</span>
+				</Tooltip>
+			);
+		}
 		return (
 			<span role="status" className="flex items-center gap-1 px-1 text-xs font-medium text-green-700">
 				<MailCheck className="h-3.5 w-3.5" aria-hidden="true" />
@@ -53,22 +68,26 @@ export function MessageUnsubscribeButton({ messageId, variant = "header" }: { me
 			</span>
 		);
 	}
+	const trigger = (
+		<Button
+			type="button"
+			variant="ghost"
+			size="sm"
+			className={iconOnly ? "h-7 w-7 shrink-0 px-0" : row ? "h-5 border border-neutral-300 px-2 text-xs" : "h-5 px-2 text-xs text-[var(--primary)] hover:text-[var(--primary)]"}
+			disabled={pending}
+			aria-label={iconOnly ? t("actions.unsubscribe") : undefined}
+			onClick={(event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				setConfirmOpen(true);
+			}}
+		>
+			{iconOnly ? <BellOff className="h-4 w-4" /> : t("actions.unsubscribe")}
+		</Button>
+	);
 	return (
 		<>
-			<Button
-				type="button"
-				variant="ghost"
-				size="sm"
-				className={row ? "h-5 border border-neutral-300 px-2 text-xs" : "h-5 px-2 text-xs text-[var(--primary)] hover:text-[var(--primary)]"}
-				disabled={pending}
-				onClick={(event) => {
-					event.preventDefault();
-					event.stopPropagation();
-					setConfirmOpen(true);
-				}}
-			>
-				{t("actions.unsubscribe")}
-			</Button>
+			{iconOnly ? <Tooltip label={t("actions.unsubscribe")}>{trigger}</Tooltip> : trigger}
 			<Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
 				{/* React events bubble through the portal; keep clicks from reaching the list row. */}
 				<DialogContent onClick={(event) => event.stopPropagation()}>

@@ -1,7 +1,7 @@
 "use client";
 
-import { createElement, useEffect, useState } from "react";
-import { Ban, FileCode2, Forward, Info, Mail, MailOpen, MoreVertical, Reply, ReplyAll, Star } from "@/components/icons";
+import { createElement, useState } from "react";
+import { Ban, FileCode2, Forward, Info, Mail, MailOpen, MoreVertical, Note, Reply, ReplyAll, Star } from "@/components/icons";
 import { useCompose } from "@/components/compose/compose-context";
 import { MessageSourceDialog } from "@/components/messages/message-source-dialog";
 import { MessageActionMenu, MessageActionMenuItem, MessageActionMenuSeparator } from "@/components/message-actions/action-menu";
@@ -9,6 +9,7 @@ import { getOwnAddressForMessage } from "@/app/(dashboard)/inbox/[messageId]/uti
 import { useLanguage } from "@/components/language-provider";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
+import { confirmDestructive } from "@/components/ui/confirm-dialog";
 import { cn } from "@/lib/utils";
 import {
 	blockMessageContact,
@@ -16,11 +17,15 @@ import {
 	createReplyDraft,
 	getMoveMessageActions,
 	getReplyRecipients,
+	canBlockSenderDomain,
+	getBlockErrorKey,
+	getSenderDomain,
 	getReplyThreading,
 	hasAdditionalRecipients,
 	runSingleMessageAction,
 } from "@/components/message-actions/utils";
 import { toggleMessageStar } from "./message-list-row-actions-utils";
+import { useConversationNotes } from "./conversation-notes-context";
 import type { ThreadMessageActionsProps } from "./thread-message-actions-types";
 import type { ReplyMode } from "@/components/message-actions/types";
 
@@ -35,6 +40,8 @@ export function ThreadMessageActions({
 }: ThreadMessageActionsProps) {
 	const { t } = useLanguage();
 	const { openDraftComposer } = useCompose();
+	const notes = useConversationNotes();
+	const noteCount = notes?.notes.filter((note) => note.messageId === message.id).length ?? 0;
 	const [starred, setStarred] = useState(message.starred);
 	const [sourceOpen, setSourceOpen] = useState(false);
 	const [pending, setPending] = useState(false);
@@ -45,13 +52,17 @@ export function ThreadMessageActions({
 		? getOwnAddressForMessage(message, ownAddresses)
 		: ownAddress;
 
-	useEffect(() => setStarred(message.starred), [message.starred]);
+	const [prevStarred, setPrevStarred] = useState(message.starred);
+	if (message.starred !== prevStarred) {
+		setPrevStarred(message.starred);
+		setStarred(message.starred);
+	}
 
 	async function onToggleStar() {
 		setPending(true);
 		setError(null);
 		try {
-			setStarred((await toggleMessageStar(message.id)).starred);
+			setStarred((await toggleMessageStar(message.id, !starred)).starred);
 		} catch (nextError) {
 			setError(nextError instanceof Error ? nextError.message : t("message.error.star"));
 		} finally {
@@ -119,9 +130,25 @@ export function ThreadMessageActions({
 		setError(null);
 		try {
 			await blockMessageContact({ mailboxId, senderAddress: message.fromAddr });
-			await runSingleMessageAction(message.id, "trash");
+			await runSingleMessageAction(message.id, "trash", { undo: false });
 		} catch (nextError) {
 			setError(nextError instanceof Error ? nextError.message : t("message.error.block"));
+		} finally {
+			setPending(false);
+		}
+	}
+
+	async function onBlockDomain() {
+		const domain = getSenderDomain(message.fromAddr);
+		if (!mailboxId || !domain) return;
+		if (!await confirmDestructive(t("message.blockDomainConfirm", { domain }))) return;
+		setPending(true);
+		setError(null);
+		try {
+			await blockMessageContact({ mailboxId, senderAddress: message.fromAddr, scope: "domain" });
+			await runSingleMessageAction(message.id, "trash", { undo: false });
+		} catch (nextError) {
+			setError(t(getBlockErrorKey(nextError)));
 		} finally {
 			setPending(false);
 		}
@@ -142,6 +169,21 @@ export function ThreadMessageActions({
 						onClick={onToggleDetails}
 					>
 						<Info className="h-4 w-4" />
+					</Button>
+				</Tooltip>
+			)}
+			{notes && noteCount > 0 && (
+				<Tooltip label={t("note.count", { count: noteCount })}>
+					<Button
+						type="button"
+						variant="ghost"
+						size="sm"
+						className="h-8 gap-1 px-2 text-xs text-neutral-600"
+						aria-label={t("note.count", { count: noteCount })}
+						onClick={() => notes.setOpen(true)}
+					>
+						<Note className="h-4 w-4" />
+						{noteCount}
 					</Button>
 				</Tooltip>
 			)}
@@ -203,6 +245,11 @@ export function ThreadMessageActions({
 						<MessageActionMenuItem icon={<FileCode2 className="h-4 w-4" />} onSelect={() => setSourceOpen(true)}>
 							{t("message.showOriginal")}
 						</MessageActionMenuItem>
+						{notes && (
+							<MessageActionMenuItem icon={<Note className="h-4 w-4" />} onSelect={() => notes.startNote(message.id)}>
+								{t("note.add")}
+							</MessageActionMenuItem>
+						)}
 						<MessageActionMenuSeparator />
 						<MessageActionMenuItem
 							icon={message.read ? <Mail className="h-4 w-4" /> : <MailOpen className="h-4 w-4" />}
@@ -225,6 +272,11 @@ export function ThreadMessageActions({
 								<MessageActionMenuItem icon={<Ban className="h-4 w-4" />} onSelect={() => void onBlock()}>
 									{t("message.blockContact")}
 								</MessageActionMenuItem>
+								{canBlockSenderDomain(message.fromAddr) && (
+									<MessageActionMenuItem icon={<Ban className="h-4 w-4" />} onSelect={() => void onBlockDomain()}>
+										{t("message.blockDomain")}
+									</MessageActionMenuItem>
+								)}
 							</>
 						)}
 					</MessageActionMenu>

@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { useLanguage } from "@/components/language-provider";
 import { Button } from "@/components/ui/button";
+import { alertDialog, confirmDestructive } from "@/components/ui/confirm-dialog";
 import {
   Dialog,
   DialogContent,
@@ -24,6 +25,7 @@ import DomainItemCard from "./DomainItemCard";
 import { SectionRowSkeleton } from "@/components/page-skeletons";
 import { checkDomain } from "./utils";
 import { confirmMxReplacement, createDomain, isMxConflictError } from "./api";
+import { Select } from "@/components/ui/select";
 
 export default function DomainsPage() {
   const { t } = useLanguage();
@@ -97,12 +99,45 @@ export default function DomainsPage() {
     },
   });
 
+  // A policy or TLS reports still published for the domain make the server answer 409; an admin can then force the
+  // delete by typing the host name. The answer lists the DNS records that are left to remove by hand.
   const remove = useMutation({
-    mutationFn: async (id: string) => {
-      const res = await authFetch(`/api/domains/${id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error(t("domains.removeFailed"));
+    mutationFn: async (domain: { id: string; hostname: string }) => {
+      const send = (force: boolean) =>
+        authFetch(`/api/domains/${domain.id}`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: force ? JSON.stringify({ force: true, confirm: domain.hostname }) : undefined,
+        });
+      let res = await send(false);
+      let json = (await res.json().catch(() => null)) as { error?: string; code?: string; leftovers?: { name: string; type: string }[]; cachedUntil?: string | null } | null;
+      if (res.status === 409 && (json?.code === "MTA_STS_PUBLISHED" || json?.code === "TLS_RPT_ENABLED")) {
+        const forced = await confirmDestructive({
+          title: t("domains.forceRemove"),
+          message: t("domains.forceRemoveConfirm", { reason: json.error ?? "", host: domain.hostname }),
+          requireText: domain.hostname,
+          confirmLabel: t("domains.forceRemove"),
+        });
+        if (!forced) return null;
+        res = await send(true);
+        json = (await res.json().catch(() => null)) as typeof json;
+      }
+      if (!res.ok) throw new Error(json?.error ?? t("domains.removeFailed"));
+      return { hostname: domain.hostname, leftovers: json?.leftovers ?? [], cachedUntil: json?.cachedUntil ?? null };
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["domains"] }),
+    onSuccess: async (result) => {
+      qc.invalidateQueries({ queryKey: ["domains"] });
+      if (!result || (result.leftovers.length === 0 && !result.cachedUntil)) return;
+      const lines = result.leftovers.map((record) => `${record.type} ${record.name}`);
+      await alertDialog({
+        title: t("domains.forceRemoved", { host: result.hostname }),
+        message: [
+          lines.length > 0 ? `${t("domains.forceRemovedRecords")}\n${lines.join("\n")}` : "",
+          result.cachedUntil ? t("domains.forceRemovedCache", { date: new Date(result.cachedUntil).toLocaleDateString() }) : "",
+        ].filter(Boolean).join("\n\n"),
+      });
+    },
+    onError: (error) => void alertDialog(error.message),
   });
 
   const loadDns = async (id: string) => {
@@ -170,7 +205,7 @@ export default function DomainsPage() {
       };
       let { res, json } = await put(false);
       // Cloudflare sending refuses while another service's MX records exist.
-      if (confirmMxReplacement(res, json)) ({ res, json } = await put(true));
+      if (await confirmMxReplacement(res, json)) ({ res, json } = await put(true));
       if (!res.ok) throw new Error(json.error ?? t("domains.sendingChangeFailed"));
       if (json.warning) setSendingMessage(json.warning);
       await loadDns(id);
@@ -238,7 +273,7 @@ export default function DomainsPage() {
         };
       };
       let { res, json } = await post(false);
-      if (confirmMxReplacement(res, json)) ({ res, json } = await post(true));
+      if (await confirmMxReplacement(res, json)) ({ res, json } = await post(true));
       if (!res.ok) throw new Error(json.error ?? t("domains.dnsSetupFailed"));
       if (json.domain && json.dns) {
         const updatedView = { domain: json.domain, dns: json.dns };
@@ -342,17 +377,18 @@ export default function DomainsPage() {
                         : t("domains.providerHintLater")}
                   </p>
                 </div>
-                <select
+                <Select
                   id="receiving-provider"
                   value={receivingProvider}
                   onChange={(e) => setReceivingProvider(e.target.value as ReceivingProvider)}
-                  className="h-9 shrink-0 rounded-md border border-neutral-200 bg-white px-3 text-sm"
+                  containerClassName="h-9 shrink-0 rounded-md bg-white px-0"
+                  className="px-3 text-sm"
                 >
                   <option value="cloudflare">{t("domains.cloudflareRouting")}</option>
                   <option value="resend">Resend</option>
                   <option value="ses">Amazon SES</option>
                   <option value="none">{t("domains.notSelected")}</option>
-                </select>
+                </Select>
               </div>
               <div className="flex items-center justify-between gap-4 rounded-xl bg-neutral-50 px-4 py-3">
                 <div>
@@ -368,17 +404,18 @@ export default function DomainsPage() {
                   </p>
                 </div>
                 {domainChecking && <LoaderCircle className="h-4 w-4 shrink-0 animate-spin text-neutral-500" />}
-                <select
+                <Select
                   id="sending-provider"
                   value={sendingProvider}
                   onChange={(e) => setSendingProvider(e.target.value as SendingProvider)}
-                  className="h-9 shrink-0 rounded-md border border-neutral-200 bg-white px-3 text-sm"
+                  containerClassName="h-9 shrink-0 rounded-md bg-white px-0"
+                  className="px-3 text-sm"
                 >
                   <option value="cloudflare">{t("domains.cloudflareSending")}</option>
                   <option value="resend">Resend</option>
                   <option value="ses">Amazon SES</option>
                   <option value="none">{t("domains.notSelected")}</option>
-                </select>
+                </Select>
               </div>
                 </>
               )}

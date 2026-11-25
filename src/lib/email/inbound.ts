@@ -3,14 +3,20 @@ import { getDb } from "@/db";
 import { messages, outboundJobs, users } from "@/db/schema";
 import { newId } from "@/lib/ids";
 import { buildSnippet, parseRawMime } from "@/lib/email/parse";
+import { matchReportAddress } from "@/lib/deliverability/report-address";
+import { ingestReportMail, type BatchBudget } from "@/lib/deliverability/ingest";
+import { readTrustedDmarcResult } from "@/lib/spam/analyzers/authentication";
 import { boundParsedEmail } from "@/lib/email/inbound-limits";
 import { resolveInboundAddress, resolveInboxRuleDestination } from "@/lib/email/routing";
 import { dispatchWebhooks } from "@/lib/email/webhooks";
 import { getMessageContactNames, upsertContactFromAddress } from "@/lib/contacts/service";
 import { getEmailAddress } from "@/lib/email/address";
 import { sendMailboxAutoReply } from "@/lib/email/auto-reply";
+import { isOthersDraft } from "@/lib/email/draft-access";
+import { recordDsnBounces } from "@/lib/deliverability/suppression";
 import { getMailboxAccessLevel } from "@/lib/mailboxes/access";
 import { listMessageAttachments, storeMessageAttachments } from "@/lib/email/attachments";
+import { registerInboundInvite } from "@/lib/calendar/invite-store";
 import { inboundAttachmentLimitReason } from "@/lib/email/inbound-attachments";
 import { inboundMessageId } from "@/lib/email/inbound-id";
 import { extractUnsubscribeLinkFromBody, extractUnsubscribeUrlFromRaw, getUnsubscribeUrlFromRawR2Key } from "@/lib/email/unsubscribe";
@@ -28,6 +34,11 @@ import {
 	notifyUsersOfNewMessage,
 } from "@/lib/realtime/utils";
 import { scheduleAutoDraft } from "@/lib/agent/jobs/utils";
+import { isSilentPromotion } from "@/lib/promotions/mode-utils";
+import { loadPromotionModes, type PromotionMode } from "@/lib/promotions/settings";
+import { buildNewMessageNotification } from "@/lib/email/inbound-notification";
+import { readHeaderMap } from "@/lib/email/provider-trace";
+import { classifyInboundCategory } from "@/lib/promotions/classify";
 
 export type InboundQueueMessage = {
 	from: string;
@@ -42,11 +53,20 @@ export type InboundQueueMessage = {
 export async function processInboundMessage(
 	env: CloudflareEnv,
 	payload: InboundQueueMessage,
+	options: { reportBudget?: BatchBudget } = {},
 ): Promise<void> {
 	const db = getDb(env);
+	// DMARC aggregate reports bypass mailboxes entirely (see report-address.ts); they are parsed into stats and discarded.
+	const reportTarget = await matchReportAddress(env, payload.to);
+	if (reportTarget) {
+		// The From header, not the envelope sender: it is what the DMARC verdict aligned to.
+		const from = Object.entries(payload.headers ?? {}).find(([name]) => name.toLowerCase() === "from")?.[1] ?? null;
+		await ingestReportMail(env, reportTarget, { rawR2Key: payload.rawR2Key, authenticated: readTrustedDmarcResult(payload.headers, payload.verdicts) === "pass", from }, { batchBudget: options.reportBudget });
+		return;
+	}
 	// The sender is passed so that sender-based block rules resolve the same way here as they
 	// do in the Worker email handler.
-	const decision = await resolveInboundAddress(db, payload.to, payload.from);
+	const decision = await resolveInboundAddress(db, payload.to, payload.from, { headers: payload.headers });
 
 	// Nothing references the raw object on these paths, so keep it from piling up in storage.
 	const dropRaw = () => env.BUCKET.delete(payload.rawR2Key).catch((error) => console.error(`Raw cleanup failed for ${payload.rawR2Key}`, error));
@@ -63,14 +83,8 @@ export async function processInboundMessage(
 		return;
 	}
 
-	// A forward decision only reaches the queue when the rule keeps a copy; without a
-	// destination mailbox there is nothing to store.
-	if (decision.action === "forward" && !decision.keepCopy) {
-		console.info(`Forward ${payload.to} -> ${decision.forwardTo}`);
-		await dropRaw();
-		return;
-	}
-
+	// A forward decision reaches the queue when the rule keeps a copy or the forward
+	// failed; either way it is stored if there is a mailbox to store it in.
 	if (!decision.mailbox) {
 		await dropRaw();
 		return;
@@ -122,10 +136,11 @@ export async function processInboundMessage(
 		fromAddress: fromAddr,
 		subject: parsed.subject,
 		content: [parsed.text, parsed.html, snippet].filter(Boolean).join(" "),
+		headers: payload.headers,
 	});
 	let spamAnalysis: Awaited<ReturnType<typeof analyzeSpam>> | null = null;
 	let spamAnalysisError: string | null = null;
-	const [owner] = await db.select({ enabled: users.spamProtectionEnabled }).from(users).where(eq(users.id, decision.mailbox.userId)).limit(1);
+	const [owner] = await db.select({ enabled: users.spamProtectionEnabled, strictness: users.spamStrictness }).from(users).where(eq(users.id, decision.mailbox.userId)).limit(1);
 	if (owner?.enabled !== false) {
 		try {
 			const intelligence = await getSpamIntelligenceConfig(env);
@@ -137,6 +152,7 @@ export async function processInboundMessage(
 				verdicts: payload.verdicts,
 				senderIp: payload.senderIp,
 				brands: intelligence.brands,
+				strictness: owner?.strictness,
 				message: parsed,
 				intelligenceProvider: new ExternalSpamIntelligenceProvider(intelligence, env.BUCKET),
 			});
@@ -167,6 +183,12 @@ export async function processInboundMessage(
 	}).catch((error) => {
 		console.error(`Contact upsert failed for ${messageId}`, error);
 		return null;
+	});
+	const { category, senderAddress } = await classifyInboundCategory(db, {
+		mailboxId: decision.mailbox.mailboxId,
+		from: fromAddr,
+		headers: payload.headers ?? readHeaderMap(buffer),
+		contactSource: contact?.source,
 	});
 	let threadId: string;
 	try {
@@ -211,6 +233,8 @@ export async function processInboundMessage(
 			inReplyTo: parsed.inReplyTo,
 			references: parsed.references.length ? parsed.references.join(" ") : null,
 			hasUnsubscribe: !!extractUnsubscribeUrlFromRaw(buffer) || !!extractUnsubscribeLinkFromBody(parsed.html, parsed.text),
+			category,
+			senderAddress,
 			spamScore: spamAnalysis?.score ?? null,
 			spamVerdict: spamAnalysis?.verdict ?? null,
 			spamSignals: spamAnalysis ? JSON.stringify(spamAnalysis.signals) : null,
@@ -220,6 +244,9 @@ export async function processInboundMessage(
 		if (!inserted.length) return;
 
 		await storeMessageAttachments(env, messageId, parsed.attachments);
+		if (status !== "spam" && status !== "trash") {
+			await registerInboundInvite(env, { userId: decision.mailbox.userId, mailboxId: decision.mailbox.mailboxId, messageId, senderAddress: fromAddr, attachments: parsed.attachments });
+		}
 		if (spamAnalysis) {
 			try {
 				await recordReputationObservation(env, decision.mailbox.mailboxId, getReputationKeys(parsed, spamAnalysis.fingerprint));
@@ -236,6 +263,13 @@ export async function processInboundMessage(
 	} catch (error) {
 		await db.delete(messages).where(eq(messages.id, messageId));
 		throw error;
+	}
+
+	// A returned message is still delivered to the mailbox; recording its failed recipients is best effort.
+	try {
+		await recordDsnBounces(env, { mailboxId: decision.mailbox.mailboxId, raw: buffer });
+	} catch (error) {
+		console.error(`Bounce recording failed for ${messageId}`, error);
 	}
 
 	if (status === "received") {
@@ -261,14 +295,18 @@ export async function processInboundMessage(
 			decision.mailbox.mailboxId,
 			decision.mailbox.userId,
 		);
-		await notifyUsersOfNewMessage(env, notificationUserIds, {
-			type: "new_message",
+		// Promotions a `separate` mailbox files away are not announced. Any lookup failure announces: delivery and notification never depend on this.
+		const mode = category === "promotions"
+			? (await loadPromotionModes(db, [decision.mailbox.mailboxId]).catch(() => new Map<string, PromotionMode>())).get(decision.mailbox.mailboxId)
+			: undefined;
+		await notifyUsersOfNewMessage(env, notificationUserIds, buildNewMessageNotification({
 			messageId,
 			mailboxId: decision.mailbox.mailboxId,
-			from: fromAddr,
-			fromName: contact?.displayName ?? null,
+			fromAddr,
+			contact,
 			subject: parsed.subject,
-		});
+			category,
+		}), { silent: isSilentPromotion(category, mode) });
 	}
 	// Spam and blocked mail carry an unauthenticated From; consumers acting on it would be fooled.
 	if (status !== "spam" && status !== "trash") {
@@ -281,6 +319,7 @@ export async function processInboundMessage(
 			threadId,
 			spamScore: spamAnalysis?.score,
 			spamVerdict: spamAnalysis?.verdict,
+			category,
 		});
 	}
 	try {
@@ -333,13 +372,10 @@ export async function getMessageWithBody(env: CloudflareEnv, userId: string, mes
 export async function getMessageWithBodyForUser(env: CloudflareEnv, user: SessionUser, messageId: string) {
 	const db = getDb(env);
 	const [message] = await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
-	if (!message?.mailboxId) return null;
+	if (!message?.mailboxId || isOthersDraft(message, user.id)) return null;
 	const access = await getMailboxAccessLevel(db, user, message.mailboxId);
 	if (!access?.canRead) return null;
-	const [contactNames, attachments, unsubscribe, [scheduledJob]] = await Promise.all([
-		getMessageContactNames(env, message.userId, message.fromAddr, message.toAddr),
-		listMessageAttachments(env, messageId),
-		getUnsubscribeUrlFromRawR2Key(env, message.rawR2Key),
+	const [scheduledJob, contactNames, attachments, unsubscribe] = await Promise.all([
 		message.direction === "outbound" && message.status === "queued"
 			? db
 				.select({ scheduledAt: outboundJobs.scheduledAt })
@@ -347,6 +383,9 @@ export async function getMessageWithBodyForUser(env: CloudflareEnv, user: Sessio
 				.where(and(eq(outboundJobs.messageId, messageId), eq(outboundJobs.status, "queued"), isNotNull(outboundJobs.scheduledAt)))
 				.limit(1)
 			: Promise.resolve([]),
+		getMessageContactNames(env, message.userId, message.fromAddr, message.toAddr),
+		listMessageAttachments(env, messageId),
+		getUnsubscribeUrlFromRawR2Key(env, message.rawR2Key),
 	]);
 	const { rawR2Key, textBody, htmlBody, ...header } = message;
 	void rawR2Key;
@@ -356,18 +395,18 @@ export async function getMessageWithBodyForUser(env: CloudflareEnv, user: Sessio
 		attachments,
 		unsubscribeUrl: unsubscribe?.url ?? null,
 		unsubscribeViaBody: unsubscribe ? null : extractUnsubscribeLinkFromBody(htmlBody, textBody),
-		scheduledAt: scheduledJob?.scheduledAt?.toISOString() ?? null,
+		scheduledAt: scheduledJob[0]?.scheduledAt?.toISOString() ?? null,
 	};
 }
 
 export async function getMessageMetadataForUser(env: CloudflareEnv, user: SessionUser, messageId: string) {
 	const db = getDb(env);
 	const [message] = await db
-		.select({ mailboxId: messages.mailboxId, rawR2Key: messages.rawR2Key, htmlBody: messages.htmlBody, textBody: messages.textBody })
+		.select({ mailboxId: messages.mailboxId, rawR2Key: messages.rawR2Key, htmlBody: messages.htmlBody, textBody: messages.textBody, status: messages.status, privateDraft: messages.privateDraft, userId: messages.userId })
 		.from(messages)
 		.where(eq(messages.id, messageId))
 		.limit(1);
-	if (!message?.mailboxId) return null;
+	if (!message?.mailboxId || isOthersDraft(message, user.id)) return null;
 	const access = await getMailboxAccessLevel(db, user, message.mailboxId);
 	if (!access?.canRead) return null;
 	const [attachments, unsubscribe] = await Promise.all([

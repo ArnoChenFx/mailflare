@@ -1,7 +1,8 @@
 import type { Message } from "@/hooks/types";
 import { authFetch } from "@/lib/auth/client";
 import { dispatchMessagesChanged } from "@/lib/messages/change-events";
-import { markMessagesReadInCaches } from "@/hooks/utils";
+import { performMessageAction } from "@/lib/messages/actions/client";
+import { isReversibleMessageAction } from "@/lib/messages/actions/definitions";
 import { getEmailDisplayName, splitEmailAddressList } from "@/lib/email/address";
 import { formatUserDate, getUserTimeZone, zonedDateFields } from "@/lib/time/utils";
 import type { MailboxOption } from "@/components/mailbox-provider";
@@ -61,12 +62,11 @@ export function getMessagePreview(message: Message, folder: MessageFolderConfig[
 	return message.snippet || t("thread.noPreview");
 }
 
-export function formatMessageListTimestamp(createdAt: string): string {
+export function formatMessageListTimestamp(createdAt: string, todayKey: string): string {
 	const zone = getUserTimeZone();
 	const date = zonedDateFields(new Date(createdAt), zone);
-	const today = zonedDateFields(new Date(), zone);
-	if (date.toISOString().slice(0, 10) === today.toISOString().slice(0, 10)) return formatUserDate(createdAt, { hour: "2-digit", minute: "2-digit" });
-	if (date.getUTCFullYear() === today.getUTCFullYear()) return formatUserDate(createdAt, { month: "short", day: "2-digit" });
+	if (date.toISOString().slice(0, 10) === todayKey) return formatUserDate(createdAt, { hour: "2-digit", minute: "2-digit" });
+	if (date.getUTCFullYear().toString() === todayKey.slice(0, 4)) return formatUserDate(createdAt, { month: "short", day: "2-digit" });
 	return formatUserDate(createdAt, { month: "short", day: "2-digit", year: "numeric" });
 }
 
@@ -96,21 +96,30 @@ export function formatEmailPageTitle({ location, total, unread, emailAddress, in
 	return `${location} (${count})${suffix}`;
 }
 
-export async function runBulkMessageAction(messageIds: string[], action: string, notify = true, folderId?: string) {
+export async function runBulkMessageAction(
+	messageIds: string[],
+	action: string,
+	notify = true,
+	folderId?: string,
+	options: { undo?: boolean } = {},
+) {
+	if (isReversibleMessageAction(action)) {
+		await performMessageAction(
+			{ action, messageIds, folderId },
+			{ notify, undo: options.undo !== false },
+		);
+		return;
+	}
+	if (action !== "delete") throw new Error(defaultTranslator("error.updateSelected"));
+
 	const response = await authFetch("/api/messages/bulk", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ messageIds, action, folderId }),
+		body: JSON.stringify({ messageIds, action }),
 	});
-
 	if (!response.ok) throw new Error(defaultTranslator("error.updateSelected"));
 	await throwIfDeleteSkipped(response, action);
-	const readChanged = action === "read" || action === "unread";
-	if (readChanged) markMessagesReadInCaches(messageIds, action === "read");
-	if (notify) {
-		if (readChanged) dispatchMessagesChanged({ kind: "read", messageIds, read: action === "read" });
-		else dispatchMessagesChanged();
-	}
+	dispatchMessagesChanged({ kind: "removed", action: "delete", messageIds });
 }
 
 /**
